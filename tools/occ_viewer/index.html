@@ -12,6 +12,9 @@
       --muted: #9aa3ad;
       --accent: #3aa0ff;
       --border: #2a313c;
+      --x: #ff4d4d;
+      --y: #3dde6a;
+      --z: #4da3ff;
     }
     * { box-sizing: border-box; }
     html, body {
@@ -21,17 +24,18 @@
     }
     #app {
       display: grid;
-      grid-template-rows: auto 1fr auto;
+      grid-template-rows: auto 1fr;
       height: 100%;
+      min-height: 0;
     }
     header {
       display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
       padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
     }
-    header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: 0.02em; }
+    header h1 { font-size: 15px; margin: 0; font-weight: 600; }
     header .meta { color: var(--muted); }
     .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-left: auto; }
-    label.ctrl { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+    label.ctrl { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); white-space: nowrap; }
     select, button {
       background: #222833; color: var(--text); border: 1px solid var(--border);
       border-radius: 6px; padding: 6px 10px;
@@ -40,31 +44,64 @@
     button:hover { border-color: var(--accent); }
     #main {
       display: grid;
-      grid-template-columns: 280px 1fr;
+      grid-template-columns: 260px minmax(0, 1.2fr) minmax(360px, 0.9fr);
       min-height: 0;
     }
     #sidebar {
       background: var(--panel); border-right: 1px solid var(--border);
       padding: 12px; overflow: auto;
     }
-    #sidebar h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 8px; }
-    #view { position: relative; min-height: 0; }
+    #sidebar h2 {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--muted); margin: 0 0 8px;
+    }
+    #view { position: relative; min-height: 0; border-right: 1px solid var(--border); }
     #canvas-wrap { position: absolute; inset: 0; }
+    #axis-legend {
+      position: absolute; left: 12px; bottom: 12px; z-index: 2;
+      background: rgba(15,18,24,0.82); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.5;
+    }
+    #axis-legend .x { color: var(--x); }
+    #axis-legend .y { color: var(--y); }
+    #axis-legend .z { color: var(--z); }
+    #cams-panel {
+      display: flex; flex-direction: column; min-height: 0; background: var(--panel);
+    }
+    #cams-toolbar {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      padding: 8px 10px; border-bottom: 1px solid var(--border);
+    }
     #cams {
-      display: flex; gap: 8px; overflow-x: auto; padding: 8px 12px;
-      background: var(--panel); border-top: 1px solid var(--border);
-      min-height: 140px;
+      flex: 1; min-height: 0; overflow: auto;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 8px;
+      align-content: start;
     }
     .cam-card {
-      flex: 0 0 auto; width: 220px; background: #10141a;
-      border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+      background: #10141a; border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
     }
-    .cam-card.active { border-color: var(--accent); }
-    .cam-card img { display: block; width: 100%; height: 124px; object-fit: cover; background: #000; }
-    .cam-card .name { padding: 4px 8px; color: var(--muted); font-size: 11px; }
+    .cam-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+    .cam-card .name {
+      padding: 4px 8px; color: var(--muted); font-size: 11px;
+      display: flex; justify-content: space-between; gap: 8px;
+    }
+    .cam-card .stage {
+      position: relative; width: 100%; background: #000; aspect-ratio: 16 / 9;
+    }
+    .cam-card canvas, .cam-card img.base {
+      position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+    }
     .row { margin-bottom: 14px; }
     .hint { color: var(--muted); font-size: 12px; }
     #status { color: var(--muted); font-size: 12px; }
+    @media (max-width: 1100px) {
+      #main { grid-template-columns: 220px 1fr; grid-template-rows: 1fr 42vh; }
+      #cams-panel { grid-column: 1 / -1; border-top: 1px solid var(--border); }
+      #cams { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+    }
   </style>
 </head>
 <body>
@@ -79,7 +116,8 @@
         <label class="ctrl"><input type="checkbox" id="togOcc" checked /> Occupancy</label>
         <label class="ctrl"><input type="checkbox" id="togPts" /> Points</label>
         <label class="ctrl"><input type="checkbox" id="togGrid" checked /> Ground grid</label>
-        <button id="btnFit">Frame camera</button>
+        <label class="ctrl"><input type="checkbox" id="togAxes" checked /> Axes</label>
+        <button id="btnFit">Frame view</button>
         <span id="status"></span>
       </div>
     </header>
@@ -90,23 +128,53 @@
           <div class="hint" id="sceneInfo">Loading…</div>
         </div>
         <div class="row">
+          <h2>Vehicle frame</h2>
+          <div class="hint">
+            <span class="x" style="color:var(--x)">+X right</span><br/>
+            <span class="y" style="color:var(--y)">+Y forward</span><br/>
+            <span class="z" style="color:var(--z)">+Z up</span><br/>
+            Ground = XY plane (Z up).
+          </div>
+        </div>
+        <div class="row">
           <h2>Display</h2>
-          <label class="ctrl"><input type="range" id="occOpacity" min="0.15" max="1" step="0.05" value="0.92" /> Occ opacity</label>
-          <label class="ctrl" style="margin-top:8px"><input type="range" id="occGap" min="0" max="0.08" step="0.01" value="0.02" /> Voxel gap</label>
+          <label class="ctrl"><input type="range" id="occOpacity" min="0.2" max="1" step="0.05" value="1" /> Occ opacity</label>
+          <label class="ctrl" style="margin-top:8px"><input type="range" id="occGap" min="0" max="0.05" step="0.005" value="0" /> Voxel gap</label>
           <label class="ctrl" style="margin-top:8px"><input type="range" id="ptSize" min="0.02" max="0.25" step="0.01" value="0.06" /> Point size</label>
         </div>
         <div class="row">
           <h2>Help</h2>
           <div class="hint">
-            Drag to orbit, scroll to zoom, right-drag to pan.<br/>
-            Occupancy is solid voxels (almost abutting).<br/>
-            Point cloud is optional and off by default.
+            Drag orbit / scroll zoom / right-drag pan.<br/>
+            Gap=0 → voxels fully abut.<br/>
+            Use camera panel projection modes on the right.
           </div>
         </div>
       </aside>
-      <div id="view"><div id="canvas-wrap"></div></div>
+      <div id="view">
+        <div id="canvas-wrap"></div>
+        <div id="axis-legend">
+          <div class="x">● +X right (veh)</div>
+          <div class="y">● +Y forward (veh)</div>
+          <div class="z">● +Z up (veh)</div>
+        </div>
+      </div>
+      <section id="cams-panel">
+        <div id="cams-toolbar">
+          <strong style="font-size:12px">Cameras</strong>
+          <label class="ctrl">Project
+            <select id="projMode">
+              <option value="none">RGB only</option>
+              <option value="occ" selected>Occupancy</option>
+              <option value="points">Points</option>
+              <option value="both">Occ + Points</option>
+            </select>
+          </label>
+          <label class="ctrl"><input type="range" id="projRadius" min="1" max="5" step="1" value="2" /> Dot r</label>
+        </div>
+        <div id="cams"></div>
+      </section>
     </div>
-    <div id="cams"></div>
   </div>
   <script type="importmap">
   {
