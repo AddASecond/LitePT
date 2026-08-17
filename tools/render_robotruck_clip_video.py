@@ -1,15 +1,16 @@
-"""Render a Robotruck clip video: multi-cam + 2 BEVs + 4 side views.
+"""Render a Robotruck clip video: multi-cam + BEVs + sides + static agg + occupancy.
 
 Each output frame is a composite of:
-  - all camera views with LitePT labels projected onto the image
-  - BEV semantic + BEV lidar_id (+y forward, +x lateral)
-  - Side YZ/XZ semantic, then Side YZ/XZ lidar_id
+  - camera views with LitePT labels (clip-static + frame-dynamic)
+  - BEV/side semantic and lidar_id panels
+  - clip-level static aggregation via ego_pose
+  - voxel occupancy panels (semantic / height / binary BEV + side YZ)
 
 Usage:
   export PYTHONPATH=./
   .venv_smoke/bin/python tools/render_robotruck_clip_video.py \\
     --clip stop_1784423032302844849_vehicle-V002-20260719_090818 \\
-    --stride 2 --fps 10
+    --stride 2 --fps 10 --reuse-pred --aggregate-static --occupancy
 """
 from __future__ import annotations
 
@@ -40,6 +41,34 @@ def _load_helpers():
 
 _h = _load_helpers()
 from visualize import WAYMO_COLORS, WAYMO_NAMES  # noqa: E402
+
+
+def _load_static_agg():
+    path = ROOT / "tools" / "robotruck_static_agg.py"
+    name = "robotruck_static_agg"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+sag = _load_static_agg()
+
+
+def _load_occupancy():
+    path = ROOT / "tools" / "robotruck_occupancy.py"
+    name = "robotruck_occupancy"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+occmod = _load_occupancy()
 
 CAM_ORDER = [
     "camera1",
@@ -553,6 +582,42 @@ def main() -> int:
     )
     ap.add_argument("--proj-radius", type=int, default=3, help="Projection point radius on tile")
     ap.add_argument("--out-name", default="", help="Optional video filename stem suffix")
+    ap.add_argument(
+        "--aggregate-static",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Clip-level static aggregation via ego_pose (default on)",
+    )
+    ap.add_argument("--static-voxel", type=float, default=0.2, help="Static agg voxel size (m)")
+    ap.add_argument(
+        "--agg-stride",
+        type=int,
+        default=2,
+        help="Stride over clip frames when building static aggregate",
+    )
+    ap.add_argument(
+        "--rebuild-static-agg",
+        action="store_true",
+        help="Ignore cached static aggregate and rebuild",
+    )
+    ap.add_argument(
+        "--occupancy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Add voxel occupancy panels (default on on dev_occ)",
+    )
+    ap.add_argument(
+        "--occ-voxel",
+        type=float,
+        default=0.4,
+        help="Occupancy voxel size in meters",
+    )
+    ap.add_argument(
+        "--occ-min-points",
+        type=int,
+        default=1,
+        help="Min points in a voxel to mark occupied",
+    )
     args = ap.parse_args()
 
     clip_dir = (ROOT / args.backup_root / args.clip).resolve()
@@ -561,11 +626,12 @@ def main() -> int:
     out_root = (ROOT / args.out_dir / args.clip).resolve()
     pred_dir = out_root / "preds"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    jpg_dir = out_root / "frames_jpg_v8"
+    jpg_dir = out_root / "frames_jpg_occ"
     if args.save_frame_jpgs:
         jpg_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamps = list_clip_frames(clip_dir)[:: max(1, args.stride)]
+    all_ts = list_clip_frames(clip_dir)
+    timestamps = all_ts[:: max(1, args.stride)]
     if args.max_frames > 0:
         timestamps = timestamps[: args.max_frames]
     print(f"clip={args.clip} frames={len(timestamps)} stride={args.stride}")
@@ -578,9 +644,56 @@ def main() -> int:
     y_range = (args.bev_y_min, args.bev_y_max)
     z_range = (args.z_min, args.z_max)
     lidar_legend = [(f"lidar{k}", v) for k, v in LIDAR_ID_BGR.items()]
-    suffix = args.out_name or f"stride{args.stride}_v8"
+    suffix = args.out_name or f"stride{args.stride}_occ"
     video_path = out_root / f"{args.clip}_{suffix}.mp4"
     writer = None
+
+    static_agg = None
+    if args.aggregate_static:
+        cache_path = out_root / "static_agg" / f"static_voxel{args.static_voxel:g}_s{args.agg_stride}.npz"
+        if args.rebuild_static_agg and cache_path.is_file():
+            cache_path.unlink()
+        agg_ts = all_ts[:: max(1, args.agg_stride)]
+        print(
+            f"building/loading static aggregate n_src={len(agg_ts)} voxel={args.static_voxel} "
+            f"(oracle boxes exclude movers; no point-level track ids)",
+            flush=True,
+        )
+        static_agg = sag.load_or_build_static_aggregate(
+            clip_dir,
+            pred_dir,
+            agg_ts,
+            load_lidar_bin=_h.load_lidar_bin,
+            lidar_cols=len(_h.LIDAR_COLS),
+            infer_frame=_h.infer_frame if not args.reuse_pred else None,
+            model=model,
+            device=device,
+            grid_size=args.grid_size,
+            voxel=args.static_voxel,
+            cache_path=cache_path,
+            use_oracle_boxes=True,
+        )
+        # If cache miss and reuse-pred skipped infer, retry allowing infer for missing preds
+        if static_agg["xyz_map"].shape[0] == 0 and args.reuse_pred:
+            static_agg = sag.load_or_build_static_aggregate(
+                clip_dir,
+                pred_dir,
+                agg_ts,
+                load_lidar_bin=_h.load_lidar_bin,
+                lidar_cols=len(_h.LIDAR_COLS),
+                infer_frame=_h.infer_frame,
+                model=model,
+                device=device,
+                grid_size=args.grid_size,
+                voxel=args.static_voxel,
+                cache_path=cache_path,
+                use_oracle_boxes=True,
+            )
+        print(
+            f"static_agg points={static_agg['xyz_map'].shape[0]} "
+            f"frames={static_agg['n_frames']} cache={static_agg.get('from_cache')}",
+            flush=True,
+        )
 
     for i, ts in enumerate(timestamps):
         fr = clip_dir / "frames" / ts
@@ -603,6 +716,31 @@ def main() -> int:
             pred = _h.infer_frame(model, coord, strength, device, args.grid_size)
             np.save(pred_path, pred.astype(np.int32))
 
+        # Clip-static (map→vehicle) + frame-dynamic
+        lab_s = np.zeros((0,), np.int32)
+        lid_s = np.zeros((0,), np.int32)
+        xyz_s = np.zeros((0, 3), np.float32)
+        if static_agg is not None and static_agg["xyz_map"].shape[0] > 0:
+            pose = (meta.get("dependency") or {}).get("ego_pose", {}).get("pose")
+            if pose:
+                T_map_v = sag.ego_pose_to_T_map_vehicle(pose)
+                xyz_s, lab_s, lid_s = sag.static_in_vehicle(
+                    static_agg,
+                    T_map_v,
+                    x_range=(x_range[0] * 1.5, x_range[1] * 1.5),
+                    y_range=y_range,
+                    z_range=(z_range[0] - 2.0, z_range[1] + 5.0),
+                )
+                vis_xyz, vis_lab, vis_lid, is_dyn = sag.merge_static_dynamic(
+                    xyz_s, lab_s, lid_s, coord, pred, lidar_ids
+                )
+            else:
+                vis_xyz, vis_lab, vis_lid = coord, pred, lidar_ids
+                is_dyn = np.isin(pred.astype(np.int64), list(sag.WAYMO_DYNAMIC_IDS))
+        else:
+            vis_xyz, vis_lab, vis_lid = coord, pred, lidar_ids
+            is_dyn = np.isin(pred.astype(np.int64), list(sag.WAYMO_DYNAMIC_IDS))
+
         cam_panels: list[tuple[str, np.ndarray]] = []
         for cam_name in CAM_ORDER:
             img_path = fr / f"{cam_name}.jpg"
@@ -612,16 +750,13 @@ def main() -> int:
             K, dist5, T_c_v, cal_w, cal_h = parse_camera(cam_doc)
             img = cv2.cvtColor(np.array(Image.open(img_path).convert("RGB")), cv2.COLOR_RGB2BGR)
             ih, iw = img.shape[:2]
-            # Map calibration size → actual image size
             if iw != cal_w or ih != cal_h:
                 sx, sy = iw / float(cal_w), ih / float(cal_h)
                 K = K.copy()
                 K[0, :] *= sx
                 K[1, :] *= sy
 
-            # Resize to tile first so projected points stay visible after layout
             tile = fit_into(img, args.tile_w, args.tile_h)
-            # fit_into letterboxes; compute scale used by resize_max path
             scale = min(args.tile_w / iw, args.tile_h / ih, 1.0)
             nw, nh = max(1, int(round(iw * scale))), max(1, int(round(ih * scale)))
             x0 = (args.tile_w - nw) // 2
@@ -629,9 +764,8 @@ def main() -> int:
             K_s = K.copy()
             K_s[0, :] *= scale
             K_s[1, :] *= scale
-            # project into the content rect, then offset by letterbox
             uv, cols = project_points(
-                coord, pred, K_s, dist5, T_c_v, nw, nh, max_points=100000, seed=i
+                vis_xyz, vis_lab, K_s, dist5, T_c_v, nw, nh, max_points=100000, seed=i
             )
             if uv.shape[0]:
                 uv = uv.copy()
@@ -642,45 +776,63 @@ def main() -> int:
             )
             cam_panels.append((cam_name, proj))
 
-        seg_cols = labels_to_bgr(pred)
-        lid_cols = lidar_ids_to_bgr(lidar_ids)
+        seg_cols = labels_to_bgr(vis_lab)
+        lid_cols = lidar_ids_to_bgr(vis_lid)
         lid_stats_text, lid_rows = format_lidar_id_stats(lidar_ids)
-        print(f"  ts={ts} {lid_stats_text}", flush=True)
+        n_static = int((~is_dyn).sum()) if is_dyn.shape[0] == vis_xyz.shape[0] else xyz_s.shape[0]
+        n_dyn = int(is_dyn.sum()) if is_dyn.shape[0] else 0
+        print(
+            f"  ts={ts} {lid_stats_text} | vis N={vis_xyz.shape[0]} "
+            f"static_agg_in_roi={xyz_s.shape[0]} dyn_frame={n_dyn}",
+            flush=True,
+        )
 
         bev_seg = render_bev_bgr(
-            coord,
+            vis_xyz,
             seg_cols,
             x_range=x_range,
             y_range=y_range,
             target_w=bev_target_w,
-            title=f"BEV seg (+y forward {int(y_range[0])}..{int(y_range[1])}m, +x right)",
+            title=(
+                f"BEV seg combined (static clip-agg + dyn frame)  "
+                f"N={vis_xyz.shape[0]} static_roi={xyz_s.shape[0]} dyn={n_dyn}"
+            ),
+            seed=i,
+        )
+        bev_static = render_bev_bgr(
+            xyz_s,
+            labels_to_bgr(lab_s) if xyz_s.shape[0] else np.zeros((0, 3), np.uint8),
+            x_range=x_range,
+            y_range=y_range,
+            target_w=bev_target_w,
+            title=f"BEV static-only clip-agg  N={xyz_s.shape[0]} voxel={args.static_voxel:g}m",
             seed=i,
         )
         bev_lid = render_bev_bgr(
-            coord,
+            vis_xyz,
             lid_cols,
             x_range=x_range,
             y_range=y_range,
             target_w=bev_target_w,
             title=(
-                f"BEV lidar_id field  unique={[r[0] for r in lid_rows]}  "
+                f"BEV lidar_id (combined) unique={[r[0] for r in lid_rows]}  "
                 f"(+y {int(y_range[0])}..{int(y_range[1])}m)"
             ),
             legend_items=lidar_legend,
             seed=i,
         )
         side_yz_seg, side_xz_seg = render_side_views(
-            coord,
+            vis_xyz,
             seg_cols,
             x_range=x_range,
             y_range=y_range,
             z_range=z_range,
             target_w=bev_target_w,
             seed=i,
-            label="seg",
+            label="seg combined",
         )
         side_yz_lid, side_xz_lid = render_side_views(
-            coord,
+            vis_xyz,
             lid_cols,
             x_range=x_range,
             y_range=y_range,
@@ -690,21 +842,84 @@ def main() -> int:
             legend_items=lidar_legend,
             label="lidar_id",
         )
+
+        lidar_panels = [
+            bev_seg,
+            bev_static,
+            bev_lid,
+            side_yz_seg,
+            side_xz_seg,
+            side_yz_lid,
+            side_xz_lid,
+        ]
+
+        if args.occupancy:
+            grid = occmod.build_occupancy(
+                vis_xyz,
+                vis_lab,
+                x_range=x_range,
+                y_range=y_range,
+                z_range=z_range,
+                voxel=args.occ_voxel,
+                min_points=args.occ_min_points,
+            )
+            col_sem = occmod.occ_semantic_colors(grid, labels_to_bgr)
+            col_h = occmod.occ_height_colors(grid)
+            col_bin = occmod.occ_binary_colors(grid)
+            occ_bev_sem = occmod.render_occ_bev(
+                grid,
+                colors_bgr=col_sem,
+                target_w=bev_target_w,
+                title="Occ BEV semantic (voxel occupied)",
+            )
+            occ_bev_h = occmod.render_occ_bev(
+                grid,
+                colors_bgr=col_h,
+                target_w=bev_target_w,
+                title="Occ BEV height (max z in column)",
+            )
+            occ_bev_bin = occmod.render_occ_bev(
+                grid,
+                colors_bgr=col_bin,
+                target_w=bev_target_w,
+                title="Occ BEV binary occupied",
+            )
+            occ_side = occmod.render_occ_side_yz(
+                grid,
+                colors_bgr=col_sem,
+                target_w=bev_target_w,
+                title="Occ Side YZ semantic",
+            )
+            lidar_panels.extend([occ_bev_sem, occ_bev_h, occ_bev_bin, occ_side])
+            print(
+                f"    occ voxels={grid.centers.shape[0]} shape={grid.shape} "
+                f"voxel={grid.voxel:g}m",
+                flush=True,
+            )
+
         id_banner = render_lidar_id_banner(lidar_ids, bev_target_w)
+        # Append static-agg note on banner
+        note = (
+            f"static_agg: N_map={0 if static_agg is None else static_agg['xyz_map'].shape[0]}  "
+            f"roi={xyz_s.shape[0]}  dyn_frame={n_dyn}  "
+            f"occ_voxel={args.occ_voxel:g}m"
+        )
+        cv2.putText(
+            id_banner,
+            note[:180],
+            (16, id_banner.shape[0] - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (180, 220, 255),
+            1,
+        )
         title = (
             f"{args.clip}  ts={ts}  [{i+1}/{len(timestamps)}]  |  "
-            f"lidar_id unique={[r[0] for r in lid_rows]} (n={len(lid_rows)})"
+            f"lidar_id={[r[0] for r in lid_rows]}  static_roi={xyz_s.shape[0]} dyn={n_dyn}"
         )
         frame = compose_frame(
             cam_panels,
-            [
-                bev_seg,
-                bev_lid,
-                side_yz_seg,
-                side_xz_seg,
-                side_yz_lid,
-                side_xz_lid,
-            ],
+            lidar_panels,
             title,
             tile_w=args.tile_w,
             tile_h=args.tile_h,
