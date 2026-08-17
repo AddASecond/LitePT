@@ -10,7 +10,7 @@ Usage:
   export PYTHONPATH=./
   .venv_smoke/bin/python tools/export_robotruck_occ_scene.py \\
     --clip stop_1784423032302844849_vehicle-V002-20260719_090818 \\
-    --stride 2 --max-frames 3 --reuse-pred --occ-voxel 0.1
+    --stride 2 --max-frames 3 --reuse-pred --occ-voxel 0.2 --export-points
 """
 from __future__ import annotations
 
@@ -282,7 +282,7 @@ def main() -> int:
     ap.add_argument("--aggregate-static", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--static-voxel", type=float, default=0.25)
     ap.add_argument("--agg-stride", type=int, default=5)
-    ap.add_argument("--occ-voxel", type=float, default=0.1)
+    ap.add_argument("--occ-voxel", type=float, default=0.2)
     ap.add_argument("--occ-min-points", type=int, default=1)
     ap.add_argument("--bev-x-half", type=float, default=30.0)
     ap.add_argument("--bev-y-min", type=float, default=-200.0)

@@ -44,7 +44,7 @@
     button:hover { border-color: var(--accent); }
     #main {
       display: grid;
-      grid-template-columns: 260px minmax(0, 1.2fr) minmax(360px, 0.9fr);
+      grid-template-columns: 250px minmax(0, 1.05fr) minmax(520px, 1.15fr);
       min-height: 0;
     }
     #sidebar {
@@ -59,8 +59,8 @@
     #canvas-wrap { position: absolute; inset: 0; }
     #axis-legend {
       position: absolute; left: 12px; bottom: 12px; z-index: 2;
-      background: rgba(15,18,24,0.82); border: 1px solid var(--border);
-      border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.5;
+      background: rgba(15,18,24,0.88); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.55;
     }
     #axis-legend .x { color: var(--x); }
     #axis-legend .y { color: var(--y); }
@@ -74,33 +74,56 @@
     }
     #cams {
       flex: 1; min-height: 0; overflow: auto;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      padding: 8px;
-      align-content: start;
+      display: flex; flex-direction: column; gap: 10px;
+      padding: 10px;
     }
     .cam-card {
       background: #10141a; border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+      flex: 0 0 auto;
     }
-    .cam-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+    .cam-card.active { border-color: var(--accent); }
     .cam-card .name {
-      padding: 4px 8px; color: var(--muted); font-size: 11px;
-      display: flex; justify-content: space-between; gap: 8px;
+      padding: 6px 10px; color: var(--muted); font-size: 12px;
+      display: flex; justify-content: space-between; gap: 8px; align-items: center;
     }
     .cam-card .stage {
-      position: relative; width: 100%; background: #000; aspect-ratio: 16 / 9;
+      position: relative; width: 100%; background: #000; height: 320px; cursor: zoom-in;
     }
-    .cam-card canvas, .cam-card img.base {
-      position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+    .cam-card canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .legend {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px;
+      max-height: 280px; overflow: auto; margin-top: 6px;
     }
-    .row { margin-bottom: 14px; }
+    .legend-item {
+      display: flex; align-items: center; gap: 6px;
+      color: var(--muted); font-size: 11px; min-width: 0;
+    }
+    .legend-swatch {
+      width: 12px; height: 12px; border-radius: 2px; flex: 0 0 auto;
+      border: 1px solid rgba(255,255,255,0.15);
+    }
+    .legend-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .hint { color: var(--muted); font-size: 12px; }
     #status { color: var(--muted); font-size: 12px; }
-    @media (max-width: 1100px) {
-      #main { grid-template-columns: 220px 1fr; grid-template-rows: 1fr 42vh; }
+    /* lightbox */
+    #lightbox {
+      display: none; position: fixed; inset: 0; z-index: 50;
+      background: rgba(0,0,0,0.82); flex-direction: column;
+    }
+    #lightbox.open { display: flex; }
+    #lb-bar {
+      display: flex; gap: 10px; align-items: center; padding: 10px 14px;
+      background: #12161d; border-bottom: 1px solid var(--border);
+    }
+    #lb-stage {
+      flex: 1; position: relative; overflow: hidden; cursor: grab; background: #000;
+    }
+    #lb-stage.dragging { cursor: grabbing; }
+    #lb-canvas { position: absolute; left: 50%; top: 50%; transform-origin: center center; }
+    @media (max-width: 1200px) {
+      #main { grid-template-columns: 220px 1fr; grid-template-rows: 1fr 46vh; }
       #cams-panel { grid-column: 1 / -1; border-top: 1px solid var(--border); }
-      #cams { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+      .cam-card .stage { height: 240px; }
     }
   </style>
 </head>
@@ -114,10 +137,10 @@
           <select id="frameSelect"></select>
         </label>
         <label class="ctrl"><input type="checkbox" id="togOcc" checked /> Occupancy</label>
-        <label class="ctrl"><input type="checkbox" id="togPts" /> Points</label>
+        <label class="ctrl"><input type="checkbox" id="togPts" checked /> Points</label>
         <label class="ctrl"><input type="checkbox" id="togGrid" checked /> Ground grid</label>
         <label class="ctrl"><input type="checkbox" id="togAxes" checked /> Axes</label>
-        <button id="btnFit">Frame view</button>
+        <button id="btnFit">Reset 3D view</button>
         <span id="status"></span>
       </div>
     </header>
@@ -128,35 +151,48 @@
           <div class="hint" id="sceneInfo">Loading…</div>
         </div>
         <div class="row">
-          <h2>Vehicle frame</h2>
-          <div class="hint">
-            <span class="x" style="color:var(--x)">+X right</span><br/>
-            <span class="y" style="color:var(--y)">+Y forward</span><br/>
-            <span class="z" style="color:var(--z)">+Z up</span><br/>
-            Ground = XY plane (Z up).
+          <h2>Class legend</h2>
+          <div class="legend" id="classLegend"><span class="hint">Loading…</span></div>
+        </div>
+        <div class="row">
+          <h2>Axes = vehicle coords</h2>
+          <div class="hint" id="axisHelp">
+            Arrows follow the sign of stored point values.<br/>
+            <span style="color:var(--x)">+X</span> = increasing x<br/>
+            <span style="color:var(--y)">+Y</span> = increasing y<br/>
+            <span style="color:var(--z)">+Z</span> = increasing z<br/>
+            No left/right assumption.
           </div>
         </div>
         <div class="row">
-          <h2>Display</h2>
-          <label class="ctrl"><input type="range" id="occOpacity" min="0.2" max="1" step="0.05" value="1" /> Occ opacity</label>
-          <label class="ctrl" style="margin-top:8px"><input type="range" id="occGap" min="0" max="0.05" step="0.005" value="0" /> Voxel gap</label>
-          <label class="ctrl" style="margin-top:8px"><input type="range" id="ptSize" min="0.02" max="0.25" step="0.01" value="0.06" /> Point size</label>
-        </div>
-        <div class="row">
-          <h2>Help</h2>
+          <h2>Occupancy grid</h2>
           <div class="hint">
-            Drag orbit / scroll zoom / right-drag pan.<br/>
-            Gap=0 → voxels fully abut.<br/>
-            Use camera panel projection modes on the right.
+            Voxels snap to fixed cells:<br/>
+            <code>floor((p - origin) / v)</code><br/>
+            Display cube = cell size (gap=0 abutting).<br/>
+            Sparse = empty cells (no points), not under-sized cubes.
           </div>
+          <label class="ctrl" style="margin-top:8px">Voxel (m)
+            <input type="number" id="voxelSize" min="0.05" max="2" step="0.05" value="0.2" style="width:72px" />
+          </label>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px">
+            <button type="button" id="btnRebuildOcc">Rebuild occ</button>
+            <button type="button" id="btnResetOcc">Reset exported</button>
+          </div>
+          <div class="hint" id="occRebuildHint" style="margin-top:6px">Rebuild uses loaded points (client-side).</div>
+          <label class="ctrl" style="margin-top:8px"><input type="range" id="occOpacity" min="0.2" max="1" step="0.05" value="1" /> Opacity</label>
+          <label class="ctrl" style="margin-top:8px"><input type="range" id="occGap" min="0" max="0.05" step="0.005" value="0" /> Gap</label>
+          <label class="ctrl" style="margin-top:8px"><input type="range" id="occGrow" min="1" max="1.08" step="0.005" value="1.02" /> Size×</label>
+          <label class="ctrl" style="margin-top:8px"><input type="range" id="ptSize" min="0.02" max="0.5" step="0.01" value="0.12" /> Point size</label>
         </div>
       </aside>
       <div id="view">
         <div id="canvas-wrap"></div>
         <div id="axis-legend">
-          <div class="x">● +X right (veh)</div>
-          <div class="y">● +Y forward (veh)</div>
-          <div class="z">● +Z up (veh)</div>
+          <div class="x">→ +X = +x in bin</div>
+          <div class="y">→ +Y = +y in bin</div>
+          <div class="z">→ +Z = +z in bin</div>
+          <div style="color:#9aa3ad;margin-top:4px">Three (x,z,y); ground ≈ XY</div>
         </div>
       </div>
       <section id="cams-panel">
@@ -170,12 +206,29 @@
               <option value="both">Occ + Points</option>
             </select>
           </label>
-          <label class="ctrl"><input type="range" id="projRadius" min="1" max="5" step="1" value="2" /> Dot r</label>
+          <label class="ctrl" title="Min point size in image pixels">Pt px
+            <input type="range" id="projRadius" min="1" max="3" step="1" value="1" />
+          </label>
+          <button type="button" id="btnRefreshProj">Refresh projection</button>
+          <span class="hint">occ=voxel squares · points=pixels · click to enlarge</span>
         </div>
         <div id="cams"></div>
       </section>
     </div>
   </div>
+
+  <div id="lightbox">
+    <div id="lb-bar">
+      <strong id="lb-title">camera</strong>
+      <button id="lb-zoom-in">Zoom +</button>
+      <button id="lb-zoom-out">Zoom −</button>
+      <button id="lb-reset">Reset view</button>
+      <button id="lb-close">Close</button>
+      <span class="hint">wheel zoom · drag pan</span>
+    </div>
+    <div id="lb-stage"><canvas id="lb-canvas"></canvas></div>
+  </div>
+
   <script type="importmap">
   {
     "imports": {
