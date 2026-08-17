@@ -490,16 +490,20 @@ def compose_frame(
     tile_w: int = 1280,
     tile_h: int = 720,
     lidar_id_banner: np.ndarray | None = None,
+    cam_panel_w: int | None = None,
 ) -> np.ndarray:
-    """2x5 camera tiles + optional lidar_id banner + stacked lidar panels."""
+    """Camera tiles (optionally cam|occ pairs) + optional banner + lidar panels."""
+    pw = int(cam_panel_w or tile_w)
     tiles = []
     for name, img in cam_panels:
-        canvas = fit_into(img, tile_w, tile_h)
-        cv2.putText(canvas, name, (16, 48), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+        canvas = fit_into(img, pw, tile_h)
+        # name may already be drawn on half-panels
+        if "|" not in name:
+            cv2.putText(canvas, name, (16, 48), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
         tiles.append(canvas)
 
     while len(tiles) < 10:
-        tiles.append(np.zeros((tile_h, tile_w, 3), dtype=np.uint8))
+        tiles.append(np.zeros((tile_h, pw, 3), dtype=np.uint8))
 
     row1 = np.hstack(tiles[:5])
     row2 = np.hstack(tiles[5:10])
@@ -609,7 +613,7 @@ def main() -> int:
     ap.add_argument(
         "--occ-voxel",
         type=float,
-        default=0.4,
+        default=0.1,
         help="Occupancy voxel size in meters",
     )
     ap.add_argument(
@@ -626,7 +630,7 @@ def main() -> int:
     out_root = (ROOT / args.out_dir / args.clip).resolve()
     pred_dir = out_root / "preds"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    jpg_dir = out_root / "frames_jpg_occ"
+    jpg_dir = out_root / "frames_jpg_occ01"
     if args.save_frame_jpgs:
         jpg_dir.mkdir(parents=True, exist_ok=True)
 
@@ -640,6 +644,9 @@ def main() -> int:
     model, _ = _h.load_segmentor(ROOT / args.config_file, ROOT / args.weight, device)
 
     bev_target_w = args.tile_w * 5
+    cam_panel_w = args.tile_w * 2 if args.occupancy else args.tile_w
+    # BEV/occ strips match full camera row width (cam|occ pairs when occupancy on)
+    strip_w = cam_panel_w * 5
     x_range = (-args.bev_x_half, args.bev_x_half)
     y_range = (args.bev_y_min, args.bev_y_max)
     z_range = (args.z_min, args.z_max)
@@ -742,6 +749,26 @@ def main() -> int:
             is_dyn = np.isin(pred.astype(np.int64), list(sag.WAYMO_DYNAMIC_IDS))
 
         cam_panels: list[tuple[str, np.ndarray]] = []
+        # Build occupancy once for BEV strips + per-camera occ views
+        occ_grid = None
+        occ_sem_cols = None
+        if args.occupancy:
+            occ_grid = occmod.build_occupancy(
+                vis_xyz,
+                vis_lab,
+                x_range=x_range,
+                y_range=y_range,
+                z_range=z_range,
+                voxel=args.occ_voxel,
+                min_points=args.occ_min_points,
+            )
+            occ_sem_cols = occmod.occ_semantic_colors(occ_grid, labels_to_bgr)
+            print(
+                f"    occ voxels={occ_grid.centers.shape[0]} shape={occ_grid.shape} "
+                f"voxel={occ_grid.voxel:g}m",
+                flush=True,
+            )
+
         for cam_name in CAM_ORDER:
             img_path = fr / f"{cam_name}.jpg"
             if not img_path.is_file() or cam_name not in sensors:
@@ -774,12 +801,43 @@ def main() -> int:
             proj = draw_projection(
                 tile, uv, cols, radius=args.proj_radius, alpha=0.88
             )
-            cam_panels.append((cam_name, proj))
+            cv2.putText(
+                proj, cam_name, (16, 48), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3
+            )
+
+            if args.occupancy and occ_grid is not None:
+                # Same letterbox geometry as camera tile for matching FOV
+                occ_canvas = np.zeros((args.tile_h, args.tile_w, 3), dtype=np.uint8)
+                occ_content = occmod.render_occ_camera_view(
+                    occ_grid,
+                    occ_sem_cols,
+                    K_s,
+                    dist5,
+                    T_c_v,
+                    nw,
+                    nh,
+                    title=f"{cam_name} occ",
+                    max_voxels=200000,
+                    seed=i,
+                )
+                occ_canvas[y0 : y0 + nh, x0 : x0 + nw] = occ_content
+                cv2.putText(
+                    occ_canvas,
+                    f"{cam_name} occ",
+                    (16, 48),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.1,
+                    (255, 255, 255),
+                    3,
+                )
+                pair = np.hstack([proj, occ_canvas])
+                cam_panels.append((f"{cam_name}|occ", pair))
+            else:
+                cam_panels.append((cam_name, proj))
 
         seg_cols = labels_to_bgr(vis_lab)
         lid_cols = lidar_ids_to_bgr(vis_lid)
         lid_stats_text, lid_rows = format_lidar_id_stats(lidar_ids)
-        n_static = int((~is_dyn).sum()) if is_dyn.shape[0] == vis_xyz.shape[0] else xyz_s.shape[0]
         n_dyn = int(is_dyn.sum()) if is_dyn.shape[0] else 0
         print(
             f"  ts={ts} {lid_stats_text} | vis N={vis_xyz.shape[0]} "
@@ -792,7 +850,7 @@ def main() -> int:
             seg_cols,
             x_range=x_range,
             y_range=y_range,
-            target_w=bev_target_w,
+            target_w=strip_w,
             title=(
                 f"BEV seg combined (static clip-agg + dyn frame)  "
                 f"N={vis_xyz.shape[0]} static_roi={xyz_s.shape[0]} dyn={n_dyn}"
@@ -804,7 +862,7 @@ def main() -> int:
             labels_to_bgr(lab_s) if xyz_s.shape[0] else np.zeros((0, 3), np.uint8),
             x_range=x_range,
             y_range=y_range,
-            target_w=bev_target_w,
+            target_w=strip_w,
             title=f"BEV static-only clip-agg  N={xyz_s.shape[0]} voxel={args.static_voxel:g}m",
             seed=i,
         )
@@ -813,7 +871,7 @@ def main() -> int:
             lid_cols,
             x_range=x_range,
             y_range=y_range,
-            target_w=bev_target_w,
+            target_w=strip_w,
             title=(
                 f"BEV lidar_id (combined) unique={[r[0] for r in lid_rows]}  "
                 f"(+y {int(y_range[0])}..{int(y_range[1])}m)"
@@ -827,7 +885,7 @@ def main() -> int:
             x_range=x_range,
             y_range=y_range,
             z_range=z_range,
-            target_w=bev_target_w,
+            target_w=strip_w,
             seed=i,
             label="seg combined",
         )
@@ -837,7 +895,7 @@ def main() -> int:
             x_range=x_range,
             y_range=y_range,
             z_range=z_range,
-            target_w=bev_target_w,
+            target_w=strip_w,
             seed=i,
             legend_items=lidar_legend,
             label="lidar_id",
@@ -853,60 +911,48 @@ def main() -> int:
             side_xz_lid,
         ]
 
-        if args.occupancy:
-            grid = occmod.build_occupancy(
-                vis_xyz,
-                vis_lab,
-                x_range=x_range,
-                y_range=y_range,
-                z_range=z_range,
-                voxel=args.occ_voxel,
-                min_points=args.occ_min_points,
-            )
-            col_sem = occmod.occ_semantic_colors(grid, labels_to_bgr)
-            col_h = occmod.occ_height_colors(grid)
-            col_bin = occmod.occ_binary_colors(grid)
-            occ_bev_sem = occmod.render_occ_bev(
-                grid,
-                colors_bgr=col_sem,
-                target_w=bev_target_w,
-                title="Occ BEV semantic (voxel occupied)",
-            )
-            occ_bev_h = occmod.render_occ_bev(
-                grid,
-                colors_bgr=col_h,
-                target_w=bev_target_w,
-                title="Occ BEV height (max z in column)",
-            )
-            occ_bev_bin = occmod.render_occ_bev(
-                grid,
-                colors_bgr=col_bin,
-                target_w=bev_target_w,
-                title="Occ BEV binary occupied",
-            )
-            occ_side = occmod.render_occ_side_yz(
-                grid,
-                colors_bgr=col_sem,
-                target_w=bev_target_w,
-                title="Occ Side YZ semantic",
-            )
-            lidar_panels.extend([occ_bev_sem, occ_bev_h, occ_bev_bin, occ_side])
-            print(
-                f"    occ voxels={grid.centers.shape[0]} shape={grid.shape} "
-                f"voxel={grid.voxel:g}m",
-                flush=True,
+        if args.occupancy and occ_grid is not None:
+            col_sem = occ_sem_cols
+            col_h = occmod.occ_height_colors(occ_grid)
+            col_bin = occmod.occ_binary_colors(occ_grid)
+            lidar_panels.extend(
+                [
+                    occmod.render_occ_bev(
+                        occ_grid,
+                        colors_bgr=col_sem,
+                        target_w=strip_w,
+                        title="Occ BEV semantic (voxel occupied)",
+                    ),
+                    occmod.render_occ_bev(
+                        occ_grid,
+                        colors_bgr=col_h,
+                        target_w=strip_w,
+                        title="Occ BEV height (max z in column)",
+                    ),
+                    occmod.render_occ_bev(
+                        occ_grid,
+                        colors_bgr=col_bin,
+                        target_w=strip_w,
+                        title="Occ BEV binary occupied",
+                    ),
+                    occmod.render_occ_side_yz(
+                        occ_grid,
+                        colors_bgr=col_sem,
+                        target_w=strip_w,
+                        title="Occ Side YZ semantic",
+                    ),
+                ]
             )
 
-        id_banner = render_lidar_id_banner(lidar_ids, bev_target_w)
-        # Append static-agg note on banner
+        id_banner = render_lidar_id_banner(lidar_ids, strip_w)
         note = (
             f"static_agg: N_map={0 if static_agg is None else static_agg['xyz_map'].shape[0]}  "
             f"roi={xyz_s.shape[0]}  dyn_frame={n_dyn}  "
-            f"occ_voxel={args.occ_voxel:g}m"
+            f"occ_voxel={args.occ_voxel:g}m  cam|occ side-by-side"
         )
         cv2.putText(
             id_banner,
-            note[:180],
+            note[:200],
             (16, id_banner.shape[0] - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
@@ -915,7 +961,8 @@ def main() -> int:
         )
         title = (
             f"{args.clip}  ts={ts}  [{i+1}/{len(timestamps)}]  |  "
-            f"lidar_id={[r[0] for r in lid_rows]}  static_roi={xyz_s.shape[0]} dyn={n_dyn}"
+            f"lidar_id={[r[0] for r in lid_rows]}  static_roi={xyz_s.shape[0]} dyn={n_dyn}  "
+            f"occ={args.occ_voxel:g}m"
         )
         frame = compose_frame(
             cam_panels,
@@ -924,6 +971,7 @@ def main() -> int:
             tile_w=args.tile_w,
             tile_h=args.tile_h,
             lidar_id_banner=id_banner,
+            cam_panel_w=cam_panel_w,
         )
 
         if writer is None:

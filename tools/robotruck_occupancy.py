@@ -100,23 +100,15 @@ def build_occupancy(
     # group boundaries
     uniq, start, counts = np.unique(key_s, return_index=True, return_counts=True)
     keep = counts >= int(min_points)
-    uniq = uniq[keep]
     start = start[keep]
     counts = counts[keep]
-    if uniq.size == 0:
+    if start.size == 0:
         return empty
 
-    maj_lab = np.empty(uniq.size, dtype=np.int32)
-    max_z = np.empty(uniq.size, dtype=np.float32)
-    ijk = np.empty((uniq.size, 3), dtype=np.int32)
-    for i, (s, c) in enumerate(zip(start, counts)):
-        sl = slice(s, s + c)
-        vals, cnts = np.unique(lab_s[sl], return_counts=True)
-        maj_lab[i] = int(vals[np.argmax(cnts)])
-        max_z[i] = float(z_s[sl].max())
-        ijk[i, 0] = int(ix_s[s])
-        ijk[i, 1] = int(iy_s[s])
-        ijk[i, 2] = int(iz_s[s])
+    # Fast per-voxel stats (no Python loop): first label in voxel + max z
+    maj_lab = lab_s[start].astype(np.int32)
+    max_z = np.maximum.reduceat(z_s, start).astype(np.float32)
+    ijk = np.stack([ix_s[start], iy_s[start], iz_s[start]], axis=1).astype(np.int32)
 
     centers = np.stack(
         [
@@ -182,30 +174,35 @@ def render_occ_bev(
         )
         return img
 
-    # Collapse Z: one cell per (ix,iy) — keep max-count (or any)
+    # Collapse Z: one cell per (ix,iy) — keep max-count among z-stack
     ix = occ.ijk[:, 0]
     iy = occ.ijk[:, 1]
     flat = ix.astype(np.int64) + occ.shape[0] * iy.astype(np.int64)
-    order = np.argsort(flat)
-    flat_s = flat[order]
-    uniq, start, counts = np.unique(flat_s, return_index=True, return_counts=True)
+    order2 = np.lexsort((-occ.counts, flat))
+    flat2 = flat[order2]
+    uniq, start2 = np.unique(flat2, return_index=True)
+    best = order2[start2]
 
     half = max(1, int(round(0.5 * occ.voxel * ppm)))
-    for u, s, c in zip(uniq, start, counts):
-        sl = order[s : s + c]
-        # pick voxel with most points among z-stack
-        j = int(sl[np.argmax(occ.counts[sl])])
-        cx, cy = float(occ.centers[j, 0]), float(occ.centers[j, 1])
-        u_pix = int(round((cy - y0) * ppm))
-        v_pix = int(round((cx - x0) * ppm))
-        col = colors_bgr[j]
-        cv2.rectangle(
-            img,
-            (u_pix - half, v_pix - half),
-            (u_pix + half, v_pix + half),
-            (int(col[0]), int(col[1]), int(col[2])),
-            -1,
-        )
+    cx = occ.centers[best, 0]
+    cy = occ.centers[best, 1]
+    u_pix = np.rint((cy - y0) * ppm).astype(np.int32)
+    v_pix = np.rint((cx - x0) * ppm).astype(np.int32)
+    cols = colors_bgr[best]
+    if half <= 1:
+        m = (u_pix >= 0) & (u_pix < out_w) & (v_pix >= 0) & (v_pix < out_h)
+        img[v_pix[m], u_pix[m]] = cols[m]
+    else:
+        for u, v, c in zip(u_pix, v_pix, cols):
+            if u < -half or v < -half or u >= out_w + half or v >= out_h + half:
+                continue
+            cv2.rectangle(
+                img,
+                (int(u) - half, int(v) - half),
+                (int(u) + half, int(v) + half),
+                (int(c[0]), int(c[1]), int(c[2])),
+                -1,
+            )
 
     # distance guides
     for d in (-200, -100, 0, 100, 200, 300, 400):
@@ -318,3 +315,117 @@ def occ_binary_colors(occ: OccupancyGrid) -> np.ndarray:
     cols = np.zeros((n, 3), dtype=np.uint8)
     cols[:] = (0, 200, 255)  # BGR amber
     return cols
+
+
+def render_occ_camera_view(
+    occ: OccupancyGrid,
+    colors_bgr: np.ndarray,
+    K: np.ndarray,
+    dist5: np.ndarray,
+    T_c_v: np.ndarray,
+    width: int,
+    height: int,
+    *,
+    title: str = "occ",
+    max_voxels: int = 250000,
+    seed: int = 0,
+) -> np.ndarray:
+    """Project occupied voxels into a camera-sized image (black bg, not overlaid)."""
+    img = np.zeros((height, width, 3), dtype=np.uint8)
+    n = occ.centers.shape[0]
+    if n == 0:
+        cv2.putText(
+            img,
+            f"{title} empty",
+            (16, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (180, 180, 180),
+            2,
+        )
+        return img
+
+    centers = occ.centers
+    cols = colors_bgr
+    if n > max_voxels:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(n, size=max_voxels, replace=False)
+        centers = centers[idx]
+        cols = cols[idx]
+
+    ones = np.ones((centers.shape[0], 1), dtype=np.float64)
+    ph = np.hstack([centers.astype(np.float64), ones])
+    pc = (T_c_v @ ph.T).T[:, :3]
+    front = pc[:, 2] > 0.3
+    pc = pc[front]
+    cols = cols[front]
+    if pc.shape[0] == 0:
+        cv2.putText(
+            img,
+            f"{title} (no voxels in view)",
+            (16, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (180, 180, 180),
+            2,
+        )
+        return img
+
+    uv, _ = cv2.projectPoints(pc.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), K, dist5)
+    uv = uv.reshape(-1, 2)
+    z = pc[:, 2]
+    inside = (
+        (uv[:, 0] >= 0)
+        & (uv[:, 0] < width)
+        & (uv[:, 1] >= 0)
+        & (uv[:, 1] < height)
+        & np.isfinite(uv).all(axis=1)
+    )
+    uv = uv[inside]
+    cols = cols[inside]
+    z = z[inside]
+    if uv.shape[0] == 0:
+        cv2.putText(
+            img,
+            f"{title} (no voxels in view)",
+            (16, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (180, 180, 180),
+            2,
+        )
+        return img
+
+    # Painter's algorithm: far → near
+    order = np.argsort(-z)
+    uv = uv[order]
+    cols = cols[order]
+    z = z[order]
+
+    fx = float(K[0, 0])
+    rad = np.clip((0.5 * occ.voxel * fx / np.maximum(z, 0.3)), 1.0, 10.0).astype(np.int32)
+
+    # Fast path: write pixels; expand near voxels with a few neighbor stamps
+    uu = np.clip(np.rint(uv[:, 0]).astype(np.int32), 0, width - 1)
+    vv = np.clip(np.rint(uv[:, 1]).astype(np.int32), 0, height - 1)
+    img[vv, uu] = cols
+    # expand by radius bins (1..3) without per-point Python circle calls
+    for r in (1, 2, 3):
+        sel = rad >= r
+        if not np.any(sel):
+            continue
+        for du, dv in ((r, 0), (-r, 0), (0, r), (0, -r), (r, r), (r, -r), (-r, r), (-r, -r)):
+            u2 = np.clip(uu[sel] + du, 0, width - 1)
+            v2 = np.clip(vv[sel] + dv, 0, height - 1)
+            img[v2, u2] = cols[sel]
+
+    cv2.putText(
+        img,
+        f"{title}  voxel={occ.voxel:g}m  n={uv.shape[0]}",
+        (16, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (230, 230, 230),
+        2,
+    )
+    return img
