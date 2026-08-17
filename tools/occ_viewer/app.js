@@ -24,9 +24,17 @@ const el = {
   occRebuildHint: document.getElementById("occRebuildHint"),
   projMode: document.getElementById("projMode"),
   projRadius: document.getElementById("projRadius"),
+  projAlpha: document.getElementById("projAlpha"),
   btnRefreshProj: document.getElementById("btnRefreshProj"),
   btnFit: document.getElementById("btnFit"),
   classLegend: document.getElementById("classLegend"),
+  vidMode: document.getElementById("vidMode"),
+  vidFps: document.getElementById("vidFps"),
+  vidMaxFrames: document.getElementById("vidMaxFrames"),
+  btnExportVid: document.getElementById("btnExportVid"),
+  btnRefreshVid: document.getElementById("btnRefreshVid"),
+  vidStatus: document.getElementById("vidStatus"),
+  vidList: document.getElementById("vidList"),
   wrap: document.getElementById("canvas-wrap"),
   lightbox: document.getElementById("lightbox"),
   lbStage: document.getElementById("lb-stage"),
@@ -427,6 +435,7 @@ function projectVehToImage(xyz, labels, cam, maxN = 120000) {
 /**
  * Occupancy: filled squares with image size ≈ voxel_m * fx / depth
  * Points: single image pixels (optional min px from slider)
+ * RGB photo is always drawn first; overlays stay semi-transparent.
  */
 function drawProjectionOnCanvas(canvas, img, cam, mode, ptMinPx = 1) {
   const ctx = canvas.getContext("2d");
@@ -440,21 +449,33 @@ function drawProjectionOnCanvas(canvas, img, cam, mode, ptMinPx = 1) {
   const dh = cam.height * scale;
   const ox = (cw - dw) / 2;
   const oy = (ch - dh) / 2;
-  if (img && img.complete && img.naturalWidth) ctx.drawImage(img, ox, oy, dw, dh);
+  const hasImg = img && img.complete && img.naturalWidth > 0;
+  if (hasImg) {
+    ctx.drawImage(img, ox, oy, dw, dh);
+  } else {
+    ctx.fillStyle = "#222";
+    ctx.fillRect(ox, oy, dw, dh);
+    ctx.fillStyle = "#888";
+    ctx.font = "14px sans-serif";
+    ctx.fillText("loading image…", ox + 12, oy + 28);
+  }
 
-  const maxN = canvas.width >= cam.width * 0.8 ? 200000 : 90000;
+  if (mode === "none") return 0;
+
+  const alpha = el.projAlpha ? Number(el.projAlpha.value) : 0.4;
+  const maxN = canvas.width >= cam.width * 0.8 ? 160000 : 70000;
 
   let n = 0;
   if (mode === "occ" || mode === "both") {
     if (occCenters && occLabels && occLabels.length && activeVoxel) {
       const pts = projectVehToImage(occCenters, occLabels, cam, maxN);
       const vox = activeVoxel;
-      ctx.globalAlpha = mode === "both" ? 0.85 : 0.92;
+      // keep photo readable: capped square + translucent fill
       for (const p of pts) {
-        // full voxel edge length in pixels (perspective)
         let side = (vox * p.fx) / Math.max(p.z, 0.3);
-        side = Math.min(Math.max(side, 1.0), 220);
-        const s = side * scale;
+        side = Math.min(Math.max(side, 1.0), 64);
+        const s = Math.max(1, side * scale);
+        ctx.globalAlpha = alpha;
         ctx.fillStyle = rgbCss(p.lab);
         ctx.fillRect(ox + p.u * scale - s * 0.5, oy + p.v * scale - s * 0.5, s, s);
       }
@@ -467,10 +488,9 @@ function drawProjectionOnCanvas(canvas, img, cam, mode, ptMinPx = 1) {
     if (ptXYZ && ptLabels && ptLabels.length) {
       const pts = projectVehToImage(ptXYZ, ptLabels, cam, maxN);
       const minPx = Math.max(1, ptMinPx | 0);
-      // true point return ≈ 1 cam pixel; keep at least minPx after downscale
       const px = Math.max(minPx, Math.round(scale));
-      ctx.globalAlpha = mode === "both" ? 0.75 : 0.95;
       for (const p of pts) {
+        ctx.globalAlpha = Math.min(0.95, alpha + 0.25);
         ctx.fillStyle = rgbCss(p.lab);
         ctx.fillRect(
           ox + p.u * scale - px * 0.5,
@@ -759,6 +779,7 @@ el.ptSize.addEventListener("input", () => {
 });
 el.projMode.addEventListener("change", refreshCamProjections);
 el.projRadius.addEventListener("input", refreshCamProjections);
+if (el.projAlpha) el.projAlpha.addEventListener("input", refreshCamProjections);
 el.btnRefreshProj.addEventListener("click", () => {
   refreshCamProjections();
   if (el.lightbox.classList.contains("open") && lb.cam && lb.img) {
@@ -824,6 +845,107 @@ el.btnResetOcc.addEventListener("click", () => {
 el.btnFit.addEventListener("click", () => {
   if (currentMeta) fitCamera(currentMeta);
 });
+
+let vidPollTimer = null;
+
+function setVidStatus(msg) {
+  if (el.vidStatus) el.vidStatus.textContent = msg || "";
+}
+
+async function refreshVideoList() {
+  if (!el.vidList) return;
+  try {
+    const r = await fetch("/api/video/list");
+    const data = await r.json();
+    const vids = data.videos || [];
+    if (!vids.length) {
+      el.vidList.innerHTML = "No videos yet.";
+      return;
+    }
+    el.vidList.innerHTML = vids
+      .map((v) => {
+        const mb = (v.bytes / (1024 * 1024)).toFixed(1);
+        return `<div><a href="${v.url}" download>${v.name}</a> · ${mb} MB</div>`;
+      })
+      .join("");
+  } catch (e) {
+    el.vidList.textContent = String(e);
+  }
+}
+
+async function pollVideoJob() {
+  try {
+    const r = await fetch("/api/video/status");
+    const s = await r.json();
+    const pct = s.n ? Math.round(100 * (s.frame || 0) / s.n) : Math.round(100 * (s.progress || 0));
+    if (s.state === "running") {
+      setVidStatus(`exporting… ${s.message || ""} (${pct}%)`);
+      return true;
+    }
+    if (s.state === "done") {
+      setVidStatus(`done · ${s.relpath || s.path || "ok"}`);
+      await refreshVideoList();
+      return false;
+    }
+    if (s.state === "error") {
+      setVidStatus(`error · ${s.message || ""}`);
+      return false;
+    }
+    setVidStatus(s.state || "idle");
+    return false;
+  } catch (e) {
+    setVidStatus(String(e));
+    return false;
+  }
+}
+
+function startVidPoll() {
+  if (vidPollTimer) clearInterval(vidPollTimer);
+  vidPollTimer = setInterval(async () => {
+    const keep = await pollVideoJob();
+    if (!keep && vidPollTimer) {
+      clearInterval(vidPollTimer);
+      vidPollTimer = null;
+    }
+  }, 1000);
+}
+
+if (el.btnExportVid) {
+  el.btnExportVid.addEventListener("click", async () => {
+    setVidStatus("starting…");
+    try {
+      const body = {
+        mode: el.vidMode.value,
+        fps: Number(el.vidFps.value) || 5,
+        max_frames: Number(el.vidMaxFrames.value) || 0,
+        tile_w: 960,
+        tile_h: 540,
+      };
+      const r = await fetch("/api/video/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        setVidStatus(data.error || JSON.stringify(data));
+        return;
+      }
+      setVidStatus(`started · job=${data.job_id || "?"}`);
+      startVidPoll();
+    } catch (e) {
+      setVidStatus(String(e));
+    }
+  });
+}
+if (el.btnRefreshVid) {
+  el.btnRefreshVid.addEventListener("click", () => {
+    refreshVideoList();
+    pollVideoJob();
+  });
+}
+refreshVideoList();
+pollVideoJob();
 
 function animate() {
   requestAnimationFrame(animate);

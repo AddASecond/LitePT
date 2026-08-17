@@ -625,7 +625,7 @@ def main() -> int:
     ap.add_argument(
         "--occ-voxel",
         type=float,
-        default=0.1,
+        default=0.2,
         help="Occupancy voxel size in meters",
     )
     ap.add_argument(

@@ -185,6 +185,32 @@
           <label class="ctrl" style="margin-top:8px"><input type="range" id="occGrow" min="1" max="1.08" step="0.005" value="1.02" /> Size×</label>
           <label class="ctrl" style="margin-top:8px"><input type="range" id="ptSize" min="0.02" max="0.5" step="0.01" value="0.12" /> Point size</label>
         </div>
+        <div class="row">
+          <h2>Export video</h2>
+          <div class="hint">
+            From this scene package (no re-infer): multi-cam + BEV occ + class legend.
+          </div>
+          <label class="ctrl" style="margin-top:8px">Overlay
+            <select id="vidMode">
+              <option value="occ" selected>Occupancy</option>
+              <option value="points">Points</option>
+              <option value="both">Occ + Points</option>
+              <option value="none">RGB only</option>
+            </select>
+          </label>
+          <label class="ctrl" style="margin-top:8px">FPS
+            <input type="number" id="vidFps" min="1" max="30" step="1" value="5" style="width:64px" />
+          </label>
+          <label class="ctrl" style="margin-top:8px">Max frames
+            <input type="number" id="vidMaxFrames" min="0" max="9999" step="1" value="0" style="width:64px" title="0 = all" />
+          </label>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px">
+            <button type="button" id="btnExportVid">Export MP4</button>
+            <button type="button" id="btnRefreshVid">Refresh list</button>
+          </div>
+          <div class="hint" id="vidStatus" style="margin-top:6px">idle</div>
+          <div id="vidList" class="hint" style="margin-top:6px"></div>
+        </div>
       </aside>
       <div id="view">
         <div id="canvas-wrap"></div>
@@ -206,11 +232,14 @@
               <option value="both">Occ + Points</option>
             </select>
           </label>
+          <label class="ctrl" title="Overlay opacity on photo">Alpha
+            <input type="range" id="projAlpha" min="0.1" max="0.85" step="0.05" value="0.4" />
+          </label>
           <label class="ctrl" title="Min point size in image pixels">Pt px
             <input type="range" id="projRadius" min="1" max="3" step="1" value="1" />
           </label>
           <button type="button" id="btnRefreshProj">Refresh projection</button>
-          <span class="hint">occ=voxel squares · points=pixels · click to enlarge</span>
+          <span class="hint">RGB always underlay · occ squares semi-transparent · click to enlarge</span>
         </div>
         <div id="cams"></div>
       </section>
