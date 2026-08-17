@@ -215,6 +215,90 @@ def intensity_colors(intensity: np.ndarray) -> np.ndarray:
     return c
 
 
+def draw_roi_guides(
+    ax,
+    plane: str,
+    *,
+    lateral_m: float = 24.0,
+    range_marks_m: tuple[float, ...] = (20.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0, 400.0),
+    behind_marks_m: tuple[float, ...] = (25.0, 50.0, 100.0, 150.0, 200.0, 250.0),
+    every_m: float = 50.0,
+    max_range_m: float = 400.0,
+    behind_m: float = 250.0,
+) -> None:
+    """Overlay ROI on plot axes where +plot_x = vehicle forward (+y).
+
+    Robotruck / imu frame: +y forward, +x lateral. Visualization remaps so
+    forward is the plot horizontal axis for readability.
+    """
+    from matplotlib.patches import Rectangle
+
+    # every-50m grid along forward (plot x), both ahead and behind
+    for d in np.arange(every_m, max_range_m + 1e-6, every_m):
+        ax.axvline(float(d), color="#888888", lw=0.8, alpha=0.55, zorder=3)
+    for d in np.arange(every_m, behind_m + 1e-6, every_m):
+        ax.axvline(float(-d), color="#555555", lw=0.7, alpha=0.45, zorder=3)
+
+    # highlighted forward marks
+    for d in range_marks_m:
+        ax.axvline(float(d), color="#ffcc66", lw=1.2, alpha=0.95, zorder=4)
+        ax.text(
+            float(d),
+            0.98,
+            f"{int(d)}m",
+            color="#ffcc66",
+            fontsize=7,
+            ha="center",
+            va="top",
+            transform=ax.get_xaxis_transform(),
+            zorder=5,
+        )
+
+    # highlighted behind marks (negative forward)
+    for d in behind_marks_m:
+        if d > behind_m + 1e-6:
+            continue
+        ax.axvline(float(-d), color="#99ddff", lw=1.2, alpha=0.95, zorder=4)
+        ax.text(
+            float(-d),
+            0.98,
+            f"-{int(d)}m",
+            color="#99ddff",
+            fontsize=7,
+            ha="center",
+            va="top",
+            transform=ax.get_xaxis_transform(),
+            zorder=5,
+        )
+
+    if plane == "bev":
+        # lateral ±24m as horizontal lines on plot (vehicle ±x)
+        ax.axhline(lateral_m, color="#66ccff", lw=1.2, alpha=0.95, zorder=4)
+        ax.axhline(-lateral_m, color="#66ccff", lw=1.2, alpha=0.95, zorder=4)
+        ax.add_patch(
+            Rectangle(
+                (0.0, -lateral_m),
+                max_range_m,
+                2.0 * lateral_m,
+                fill=False,
+                edgecolor="#66ccff",
+                linewidth=1.4,
+                linestyle="--",
+                zorder=4,
+            )
+        )
+        ax.text(
+            2.0,
+            lateral_m,
+            f"±{int(lateral_m)}m",
+            color="#66ccff",
+            fontsize=8,
+            ha="left",
+            va="bottom",
+            zorder=5,
+        )
+
+
 def render_pred_vis(
     coord: np.ndarray,
     pred: np.ndarray,
@@ -223,7 +307,15 @@ def render_pred_vis(
     title: str,
     max_points: int,
     seed: int,
+    *,
+    lateral_m: float = 24.0,
+    range_marks_m: tuple[float, ...] = (20.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0, 400.0),
+    behind_marks_m: tuple[float, ...] = (25.0, 50.0, 100.0, 150.0, 200.0, 250.0),
+    every_m: float = 50.0,
+    max_range_m: float = 400.0,
+    behind_m: float = 250.0,
 ) -> None:
+    """Render Pred/Intensity BEV+side with Robotruck axes (+y forward, +x lateral)."""
     n = coord.shape[0]
     if n > max_points:
         rng = np.random.default_rng(seed)
@@ -235,19 +327,49 @@ def render_pred_vis(
     pred_c = labels_to_colors(pred)
     int_c = intensity_colors(intensity)
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12), dpi=130)
-    for ax, xy, colors, ttl, xlab, ylab in [
-        (axes[0, 0], (0, 1), pred_c, "LitePT Pred · BEV", "x", "y"),
-        (axes[0, 1], (0, 1), int_c, "Intensity · BEV", "x", "y"),
-        (axes[1, 0], (0, 2), pred_c, "LitePT Pred · Side", "x", "z"),
-        (axes[1, 1], (0, 2), int_c, "Intensity · Side", "x", "z"),
-    ]:
-        ax.scatter(coord[:, xy[0]], coord[:, xy[1]], c=colors, s=0.12, linewidths=0)
+    # Remap for display: plot_x = vehicle y (forward), plot_y_bev = vehicle x (lateral)
+    fwd = coord[:, 1]
+    lat = coord[:, 0]
+    up = coord[:, 2]
+
+    # Cover full cloud (+ at least ROI forward/behind)
+    pad = 10.0
+    x0 = float(min(fwd.min(), -behind_m) - pad)
+    x1 = float(max(fwd.max(), max_range_m) + pad)
+    y0 = float(lat.min() - pad)
+    y1 = float(lat.max() + pad)
+    z0 = float(min(up.min(), -5.0) - 2.0)
+    z1 = float(max(up.max(), 12.0) + 2.0)
+
+    fig, axes = plt.subplots(2, 2, figsize=(22, 12), dpi=130)
+    panels = [
+        (axes[0, 0], fwd, lat, pred_c, "LitePT Pred · BEV", "y forward (m)", "x lateral (m)", "bev"),
+        (axes[0, 1], fwd, lat, int_c, "Intensity · BEV", "y forward (m)", "x lateral (m)", "bev"),
+        (axes[1, 0], fwd, up, pred_c, "LitePT Pred · Side", "y forward (m)", "z up (m)", "side"),
+        (axes[1, 1], fwd, up, int_c, "Intensity · Side", "y forward (m)", "z up (m)", "side"),
+    ]
+    for ax, xs, ys, colors, ttl, xlab, ylab, plane in panels:
+        ax.scatter(xs, ys, c=colors, s=0.1, linewidths=0)
+        draw_roi_guides(
+            ax,
+            plane,
+            lateral_m=lateral_m,
+            range_marks_m=range_marks_m,
+            behind_marks_m=behind_marks_m,
+            every_m=every_m,
+            max_range_m=max_range_m,
+            behind_m=behind_m,
+        )
+        ax.set_xlim(x0, x1)
+        if plane == "bev":
+            ax.set_ylim(y0, y1)
+        else:
+            ax.set_ylim(z0, z1)
         ax.set_title(ttl, color="white")
         ax.set_xlabel(xlab, color="white")
         ax.set_ylabel(ylab, color="white")
         ax.set_facecolor("black")
-        ax.set_aspect("equal", adjustable="datalim")
+        ax.set_aspect("equal", adjustable="box")
         ax.tick_params(colors="white", labelsize=8)
         for spine in ax.spines.values():
             spine.set_color("#444444")
@@ -260,7 +382,14 @@ def render_pred_vis(
     )
 
     fig.patch.set_facecolor("#111111")
-    fig.suptitle(f"{title}\nN={n}  top classes: {hist}", color="white", fontsize=10)
+    fig.suptitle(
+        f"{title}\nN={n}  ROI ±{int(lateral_m)}m(x) / "
+        f"forward 0..{int(max_range_m)}m(+y) behind marks "
+        f"{'/'.join(str(int(x)) for x in behind_marks_m)}m  "
+        f"| every {int(every_m)}m  |  top: {hist}",
+        color="white",
+        fontsize=10,
+    )
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, facecolor=fig.get_facecolor())
