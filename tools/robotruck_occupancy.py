@@ -183,23 +183,26 @@ def render_occ_bev(
     uniq, start2 = np.unique(flat2, return_index=True)
     best = order2[start2]
 
-    half = max(1, int(round(0.5 * occ.voxel * ppm)))
-    cx = occ.centers[best, 0]
-    cy = occ.centers[best, 1]
-    u_pix = np.rint((cy - y0) * ppm).astype(np.int32)
-    v_pix = np.rint((cx - x0) * ppm).astype(np.int32)
+    # Exact abutting cells from ijk (solid grid, not sparse center dots)
+    cell = max(1, int(round(occ.voxel * ppm)))
+    iy_b = occ.ijk[best, 1].astype(np.int32)
+    ix_b = occ.ijk[best, 0].astype(np.int32)
     cols = colors_bgr[best]
-    if half <= 1:
-        m = (u_pix >= 0) & (u_pix < out_w) & (v_pix >= 0) & (v_pix < out_h)
-        img[v_pix[m], u_pix[m]] = cols[m]
+    u0 = np.floor(iy_b.astype(np.float64) * occ.voxel * ppm).astype(np.int32)
+    v0 = np.floor(ix_b.astype(np.float64) * occ.voxel * ppm).astype(np.int32)
+    if cell <= 1:
+        m = (u0 >= 0) & (u0 < out_w) & (v0 >= 0) & (v0 < out_h)
+        img[v0[m], u0[m]] = cols[m]
     else:
-        for u, v, c in zip(u_pix, v_pix, cols):
-            if u < -half or v < -half or u >= out_w + half or v >= out_h + half:
+        for u, v, c in zip(u0, v0, cols):
+            x1 = min(out_w, int(u) + cell)
+            y1 = min(out_h, int(v) + cell)
+            if x1 <= 0 or y1 <= 0 or u >= out_w or v >= out_h:
                 continue
             cv2.rectangle(
                 img,
-                (int(u) - half, int(v) - half),
-                (int(u) + half, int(v) + half),
+                (max(0, int(u)), max(0, int(v))),
+                (x1 - 1, y1 - 1),
                 (int(c[0]), int(c[1]), int(c[2])),
                 -1,
             )
