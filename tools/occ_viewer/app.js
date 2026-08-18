@@ -28,6 +28,26 @@ const el = {
   btnRefreshProj: document.getElementById("btnRefreshProj"),
   btnFit: document.getElementById("btnFit"),
   classLegend: document.getElementById("classLegend"),
+  colorMode: document.getElementById("colorMode"),
+  coarseToggles: document.getElementById("coarseToggles"),
+  lidarToggles: document.getElementById("lidarToggles"),
+  togDyn: document.getElementById("togDyn"),
+  togSta: document.getElementById("togSta"),
+  togFree: document.getElementById("togFree"),
+  togNoise: document.getElementById("togNoise"),
+  togLid1: document.getElementById("togLid1"),
+  togLid2: document.getElementById("togLid2"),
+  togLid14: document.getElementById("togLid14"),
+  roiX0: document.getElementById("roiX0"),
+  roiX1: document.getElementById("roiX1"),
+  roiY0: document.getElementById("roiY0"),
+  roiY1: document.getElementById("roiY1"),
+  roiZ0: document.getElementById("roiZ0"),
+  roiZ1: document.getElementById("roiZ1"),
+  btnApplyRoi: document.getElementById("btnApplyRoi"),
+  btnResetRoi: document.getElementById("btnResetRoi"),
+  togRoiBox: document.getElementById("togRoiBox"),
+  togRoiClip: document.getElementById("togRoiClip"),
   vidMode: document.getElementById("vidMode"),
   vidFps: document.getElementById("vidFps"),
   vidMaxFrames: document.getElementById("vidMaxFrames"),
@@ -59,10 +79,32 @@ let classNames = null;
 let occIjk = null; // Int32 ix,iy,iz
 let occLabels = null;
 let occCenters = null; // for projection
+let occProjLabels = null; // filtered labels parallel to occCenters
 let activeVoxel = null;
 let exportedOcc = null; // { voxel, ijk: Int32Array, labels: Uint8Array }
 let ptXYZ = null;
 let ptLabels = null;
+let ptLidar = null; // Uint8Array lidar_id per point
+let roiHelper = null;
+let roi = { x0: -24, x1: 24, y0: -25, y1: 150, z0: -5, z1: 3 };
+
+/** Coarse 4-class mapping (Waymo 22 → dynamic/static/freespace/noise) */
+const COARSE_DYNAMIC = new Set([0, 1, 2, 3, 4, 5, 6, 11, 12]);
+const COARSE_FREESPACE = new Set([17, 18, 19, 20, 21]);
+const COARSE_STATIC = new Set([7, 8, 9, 10, 13, 14, 15, 16]);
+const COARSE_COLORS = {
+  dynamic: [230, 64, 64],
+  static: [64, 160, 255],
+  freespace: [72, 200, 96],
+  noise: [160, 160, 160],
+};
+const COARSE_ORDER = ["dynamic", "static", "freespace", "noise"];
+/** RGB matching render_robotruck_clip_video LIDAR_ID_BGR */
+const LIDAR_COLORS = {
+  1: [40, 180, 255],
+  2: [40, 220, 40],
+  14: [255, 40, 40],
+};
 
 /** Lightbox state */
 let lb = { scale: 1, tx: 0, ty: 0, dragging: false, lx: 0, ly: 0, source: null };
@@ -165,7 +207,63 @@ async function fetchBin(url) {
   return r.arrayBuffer();
 }
 
+function fineToCoarse(lab) {
+  const i = lab | 0;
+  if (i < 0 || i >= 22) return "noise";
+  if (COARSE_DYNAMIC.has(i)) return "dynamic";
+  if (COARSE_FREESPACE.has(i)) return "freespace";
+  if (COARSE_STATIC.has(i)) return "static";
+  return "noise";
+}
+
+function colorModeValue() {
+  return el.colorMode ? el.colorMode.value : "fine";
+}
+
+function readRoiFromInputs() {
+  const a = (lo, hi) => {
+    let x0 = Number(lo.value);
+    let x1 = Number(hi.value);
+    if (!(x0 < x1)) {
+      const t = x0;
+      x0 = x1;
+      x1 = t;
+    }
+    return [x0, x1];
+  };
+  const [x0, x1] = a(el.roiX0, el.roiX1);
+  const [y0, y1] = a(el.roiY0, el.roiY1);
+  const [z0, z1] = a(el.roiZ0, el.roiZ1);
+  roi = { x0, x1, y0, y1, z0, z1 };
+  return roi;
+}
+
+function inRoi(x, y, z) {
+  if (!el.togRoiClip || !el.togRoiClip.checked) return true;
+  return x >= roi.x0 && x <= roi.x1 && y >= roi.y0 && y <= roi.y1 && z >= roi.z0 && z <= roi.z1;
+}
+
+function coarseVisible(name) {
+  if (name === "dynamic") return !el.togDyn || el.togDyn.checked;
+  if (name === "static") return !el.togSta || el.togSta.checked;
+  if (name === "freespace") return !el.togFree || el.togFree.checked;
+  if (name === "noise") return !el.togNoise || el.togNoise.checked;
+  return true;
+}
+
+function lidarVisible(lid) {
+  if (lid === 1) return !el.togLid1 || el.togLid1.checked;
+  if (lid === 2) return !el.togLid2 || el.togLid2.checked;
+  if (lid === 14) return !el.togLid14 || el.togLid14.checked;
+  return true;
+}
+
 function colorFromLabel(label) {
+  const mode = colorModeValue();
+  if (mode === "coarse") {
+    const c = COARSE_COLORS[fineToCoarse(label)] || COARSE_COLORS.noise;
+    return new THREE.Color(c[0] / 255, c[1] / 255, c[2] / 255);
+  }
   const i = label | 0;
   if (!classColors || i < 0 || i >= classColors.length || !classColors[i]) {
     return new THREE.Color(0.7, 0.7, 0.7);
@@ -174,7 +272,17 @@ function colorFromLabel(label) {
   return new THREE.Color(c[0] / 255, c[1] / 255, c[2] / 255);
 }
 
+function colorFromLidar(lid) {
+  const c = LIDAR_COLORS[lid] || [160, 160, 160];
+  return new THREE.Color(c[0] / 255, c[1] / 255, c[2] / 255);
+}
+
 function rgbCss(label) {
+  const mode = colorModeValue();
+  if (mode === "coarse") {
+    const c = COARSE_COLORS[fineToCoarse(label)] || COARSE_COLORS.noise;
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  }
   const i = label | 0;
   if (!classColors || i < 0 || i >= classColors.length || !classColors[i]) {
     return "rgb(180,180,180)";
@@ -183,8 +291,43 @@ function rgbCss(label) {
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
+function rgbCssLidar(lid) {
+  const c = LIDAR_COLORS[lid] || [160, 160, 160];
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+function syncColorModeUi() {
+  const mode = colorModeValue();
+  if (el.coarseToggles) el.coarseToggles.style.display = mode === "coarse" ? "block" : "none";
+  if (el.lidarToggles) el.lidarToggles.style.display = mode === "lidar" ? "block" : "none";
+  renderClassLegend();
+}
+
 function renderClassLegend() {
   if (!el.classLegend) return;
+  const mode = colorModeValue();
+  if (mode === "coarse") {
+    el.classLegend.innerHTML = COARSE_ORDER.map((name) => {
+      const c = COARSE_COLORS[name];
+      return `<div class="legend-item" title="${name}">
+        <i class="legend-swatch" style="background:rgb(${c[0]},${c[1]},${c[2]})"></i>
+        <span>${name}</span>
+      </div>`;
+    }).join("");
+    return;
+  }
+  if (mode === "lidar") {
+    el.classLegend.innerHTML = [1, 2, 14]
+      .map((lid) => {
+        const c = LIDAR_COLORS[lid];
+        return `<div class="legend-item" title="lidar_${lid}">
+          <i class="legend-swatch" style="background:rgb(${c[0]},${c[1]},${c[2]})"></i>
+          <span>lidar_${lid}</span>
+        </div>`;
+      })
+      .join("");
+    return;
+  }
   if (!classColors || !classColors.length) {
     el.classLegend.innerHTML = `<span class="hint">No class colors in meta</span>`;
     return;
@@ -199,6 +342,30 @@ function renderClassLegend() {
       </div>`;
     })
     .join("");
+}
+
+function updateRoiHelper() {
+  if (roiHelper) {
+    scene.remove(roiHelper);
+    roiHelper.geometry.dispose();
+    roiHelper.material.dispose();
+    roiHelper = null;
+  }
+  if (!el.togRoiBox || !el.togRoiBox.checked) return;
+  // Box in vehicle frame → Three: (x,z,y)
+  const cx = 0.5 * (roi.x0 + roi.x1);
+  const cy = 0.5 * (roi.y0 + roi.y1);
+  const cz = 0.5 * (roi.z0 + roi.z1);
+  const sx = Math.max(1e-3, roi.x1 - roi.x0);
+  const sy = Math.max(1e-3, roi.y1 - roi.y0);
+  const sz = Math.max(1e-3, roi.z1 - roi.z0);
+  const geo = new THREE.BoxGeometry(sx, sz, sy);
+  const edges = new THREE.EdgesGeometry(geo);
+  geo.dispose();
+  const mat = new THREE.LineBasicMaterial({ color: 0xffcc33 });
+  roiHelper = new THREE.LineSegments(edges, mat);
+  vehToThree(cx, cy, cz, roiHelper.position);
+  scene.add(roiHelper);
 }
 
 function clearOcc() {
@@ -225,15 +392,39 @@ function clearPoints() {
 function buildOccMesh() {
   clearOcc();
   if (!occIjk || !occLabels || !currentMeta || !activeVoxel) return;
-  const n = occLabels.length;
+  const nAll = occLabels.length;
   const v = activeVoxel;
   const x0 = currentMeta.x_range[0];
   const y0 = currentMeta.y_range[0];
   const z0 = currentMeta.z_range[0];
   const gap = Math.max(0, Number(el.occGap.value));
   const grow = Number(el.occGrow.value);
-  // size fills the cell; grow>1 seals hairline cracks from float/raster
   const size = Math.max(1e-4, v * (1.0 - gap) * grow);
+  const mode = colorModeValue();
+
+  const keepIdx = [];
+  const centersAll = new Float32Array(nAll * 3);
+  for (let i = 0; i < nAll; i++) {
+    const ix = occIjk[i * 3];
+    const iy = occIjk[i * 3 + 1];
+    const iz = occIjk[i * 3 + 2];
+    const vx = x0 + (ix + 0.5) * v;
+    const vy = y0 + (iy + 0.5) * v;
+    const vz = z0 + (iz + 0.5) * v;
+    centersAll[i * 3] = vx;
+    centersAll[i * 3 + 1] = vy;
+    centersAll[i * 3 + 2] = vz;
+    if (!inRoi(vx, vy, vz)) continue;
+    if (mode === "coarse" && !coarseVisible(fineToCoarse(occLabels[i]))) continue;
+    keepIdx.push(i);
+  }
+
+  const n = keepIdx.length;
+  if (n === 0) {
+    occCenters = new Float32Array(0);
+    occProjLabels = null;
+    return;
+  }
 
   const geo = new THREE.BoxGeometry(size, size, size);
   let op = Number(el.occOpacity.value);
@@ -249,22 +440,34 @@ function buildOccMesh() {
   const dummy = new THREE.Object3D();
   const color = new THREE.Color();
   const centers = new Float32Array(n * 3);
+  const labs = new Uint8Array(n);
 
-  for (let i = 0; i < n; i++) {
-    const ix = occIjk[i * 3];
-    const iy = occIjk[i * 3 + 1];
-    const iz = occIjk[i * 3 + 2];
-    const vx = x0 + (ix + 0.5) * v;
-    const vy = y0 + (iy + 0.5) * v;
-    const vz = z0 + (iz + 0.5) * v;
-    centers[i * 3] = vx;
-    centers[i * 3 + 1] = vy;
-    centers[i * 3 + 2] = vz;
+  for (let k = 0; k < n; k++) {
+    const i = keepIdx[k];
+    const vx = centersAll[i * 3];
+    const vy = centersAll[i * 3 + 1];
+    const vz = centersAll[i * 3 + 2];
+    centers[k * 3] = vx;
+    centers[k * 3 + 1] = vy;
+    centers[k * 3 + 2] = vz;
+    labs[k] = occLabels[i];
     vehToThree(vx, vy, vz, dummy.position);
     dummy.updateMatrix();
-    mesh.setMatrixAt(i, dummy.matrix);
-    color.copy(colorFromLabel(occLabels[i]));
-    mesh.setColorAt(i, color);
+    mesh.setMatrixAt(k, dummy.matrix);
+    // lidar mode: occ still uses fine semantic (or coarse if switched)
+    if (mode === "lidar") {
+      // force fine coloring for occ under lidar mode
+      const iLab = occLabels[i] | 0;
+      if (classColors && iLab >= 0 && iLab < classColors.length && classColors[iLab]) {
+        const c = classColors[iLab];
+        color.setRGB(c[0] / 255, c[1] / 255, c[2] / 255);
+      } else {
+        color.setRGB(0.7, 0.7, 0.7);
+      }
+    } else {
+      color.copy(colorFromLabel(occLabels[i]));
+    }
+    mesh.setColorAt(k, color);
   }
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
@@ -272,13 +475,10 @@ function buildOccMesh() {
   occMesh = mesh;
   occMesh.visible = el.togOcc.checked;
   scene.add(mesh);
-  occCenters = centers; // exact grid centers for projection
+  occCenters = centers;
+  occProjLabels = labs;
 }
 
-/**
- * Client-side grid voxelization from currently loaded points.
- * Same rule as Python: floor((p-origin)/v), first/majority label per cell.
- */
 function voxelizeFromPoints(voxel) {
   if (!ptXYZ || !ptLabels || !currentMeta) {
     throw new Error("Need exported points to rebuild occupancy");
@@ -360,18 +560,48 @@ function applyOccupancy(ijk, labels, voxel, sourceNote) {
 function buildPoints() {
   clearPoints();
   if (!ptXYZ || !ptLabels) return;
-  const n = ptLabels.length;
+  const nAll = ptLabels.length;
+  const mode = colorModeValue();
+  const keepIdx = [];
+  for (let i = 0; i < nAll; i++) {
+    const o = i * 3;
+    const x = ptXYZ[o];
+    const y = ptXYZ[o + 1];
+    const z = ptXYZ[o + 2];
+    if (!inRoi(x, y, z)) continue;
+    if (mode === "coarse" && !coarseVisible(fineToCoarse(ptLabels[i]))) continue;
+    if (mode === "lidar") {
+      const lid = ptLidar ? ptLidar[i] : 0;
+      if (!lidarVisible(lid)) continue;
+    }
+    keepIdx.push(i);
+  }
+  const n = keepIdx.length;
+  if (n === 0) return;
+
   const positions = new Float32Array(n * 3);
   const colors = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) {
+  const projXYZ = new Float32Array(n * 3);
+  const projLab = new Uint8Array(n);
+  const projLid = new Uint8Array(n);
+  for (let k = 0; k < n; k++) {
+    const i = keepIdx[k];
     const o = i * 3;
-    positions[o] = ptXYZ[o];
-    positions[o + 1] = ptXYZ[o + 2];
-    positions[o + 2] = ptXYZ[o + 1];
-    const c = colorFromLabel(ptLabels[i]);
-    colors[o] = c.r;
-    colors[o + 1] = c.g;
-    colors[o + 2] = c.b;
+    const pk = k * 3;
+    positions[pk] = ptXYZ[o];
+    positions[pk + 1] = ptXYZ[o + 2];
+    positions[pk + 2] = ptXYZ[o + 1];
+    projXYZ[pk] = ptXYZ[o];
+    projXYZ[pk + 1] = ptXYZ[o + 1];
+    projXYZ[pk + 2] = ptXYZ[o + 2];
+    projLab[k] = ptLabels[i];
+    projLid[k] = ptLidar ? ptLidar[i] : 0;
+    let c;
+    if (mode === "lidar") c = colorFromLidar(projLid[k]);
+    else c = colorFromLabel(ptLabels[i]);
+    colors[pk] = c.r;
+    colors[pk + 1] = c.g;
+    colors[pk + 2] = c.b;
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
@@ -385,7 +615,17 @@ function buildPoints() {
   pointsObj = new THREE.Points(geo, mat);
   pointsObj.renderOrder = 2;
   pointsObj.visible = el.togPts.checked;
+  pointsObj.userData.projXYZ = projXYZ;
+  pointsObj.userData.projLab = projLab;
+  pointsObj.userData.projLid = projLid;
   scene.add(pointsObj);
+}
+
+function rebuildColoredViews() {
+  buildOccMesh();
+  buildPoints();
+  updateRoiHelper();
+  refreshCamProjections();
 }
 
 function fitCamera(meta) {
@@ -399,7 +639,7 @@ function fitCamera(meta) {
   controls.update();
 }
 
-function projectVehToImage(xyz, labels, cam, maxN = 120000) {
+function projectVehToImage(xyz, labels, cam, maxN = 120000, lidarIds = null) {
   const K = cam.K;
   const T = cam.T_c_v;
   const dist = cam.dist5 || [0, 0, 0, 0, 0];
@@ -428,7 +668,15 @@ function projectVehToImage(xyz, labels, cam, maxN = 120000) {
     const u = fx * xpp + cx;
     const v = fy * ypp + cy;
     if (u < -40 || v < -40 || u >= w + 40 || v >= h + 40) continue;
-    out.push({ u, v, z: zc, lab: labels[i], fx, fy });
+    out.push({
+      u,
+      v,
+      z: zc,
+      lab: labels[i],
+      lid: lidarIds ? lidarIds[i] : 0,
+      fx,
+      fy,
+    });
   }
   out.sort((a, b) => b.z - a.z);
   return out;
@@ -469,16 +717,27 @@ function drawProjectionOnCanvas(canvas, img, cam, mode, ptMinPx = 1) {
 
   let n = 0;
   if (mode === "occ" || mode === "both") {
-    if (occCenters && occLabels && occLabels.length && activeVoxel) {
-      const pts = projectVehToImage(occCenters, occLabels, cam, maxN);
+    const occLabs = occProjLabels || occLabels;
+    if (occCenters && occLabs && occLabs.length && activeVoxel) {
+      const pts = projectVehToImage(occCenters, occLabs, cam, maxN);
       const vox = activeVoxel;
-      // keep photo readable: capped square + translucent fill
+      const cmode = colorModeValue();
       for (const p of pts) {
         let side = (vox * p.fx) / Math.max(p.z, 0.3);
         side = Math.min(Math.max(side, 1.0), 64);
         const s = Math.max(1, side * scale);
         ctx.globalAlpha = alpha;
-        ctx.fillStyle = rgbCss(p.lab);
+        // under lidar color mode, occ projection uses fine colors
+        if (cmode === "lidar") {
+          const i = p.lab | 0;
+          const c =
+            classColors && i >= 0 && i < classColors.length && classColors[i]
+              ? classColors[i]
+              : [180, 180, 180];
+          ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+        } else {
+          ctx.fillStyle = rgbCss(p.lab);
+        }
         ctx.fillRect(ox + p.u * scale - s * 0.5, oy + p.v * scale - s * 0.5, s, s);
       }
       ctx.globalAlpha = 1;
@@ -487,13 +746,19 @@ function drawProjectionOnCanvas(canvas, img, cam, mode, ptMinPx = 1) {
   }
 
   if (mode === "points" || mode === "both") {
-    if (ptXYZ && ptLabels && ptLabels.length) {
-      const pts = projectVehToImage(ptXYZ, ptLabels, cam, maxN);
+    const useFilt = pointsObj && pointsObj.userData && pointsObj.userData.projXYZ;
+    const xyz = useFilt ? pointsObj.userData.projXYZ : ptXYZ;
+    const labs = useFilt ? pointsObj.userData.projLab : ptLabels;
+    const lids = useFilt ? pointsObj.userData.projLid : ptLidar;
+    if (xyz && labs && labs.length) {
+      const pts = projectVehToImage(xyz, labs, cam, maxN, lids);
       const minPx = Math.max(1, ptMinPx | 0);
       const px = Math.max(minPx, Math.round(scale));
+      const cmode = colorModeValue();
       for (const p of pts) {
         ctx.globalAlpha = Math.min(0.95, alpha + 0.25);
-        ctx.fillStyle = rgbCss(p.lab);
+        ctx.fillStyle =
+          cmode === "lidar" ? rgbCssLidar(p.lid || 0) : rgbCss(p.lab);
         ctx.fillRect(
           ox + p.u * scale - px * 0.5,
           oy + p.v * scale - px * 0.5,
@@ -666,6 +931,7 @@ async function loadFrame(frameEntry) {
   clearPoints();
   ptXYZ = null;
   ptLabels = null;
+  ptLidar = null;
   let ptsNote = "not exported";
   if (meta.points) {
     try {
@@ -673,6 +939,10 @@ async function loadFrame(frameEntry) {
       const plabBuf = await fetchBin(`${SCENE_ROOT}/${frameDir}/${meta.points.labels}`);
       ptXYZ = new Float32Array(xyzBuf);
       ptLabels = new Uint8Array(plabBuf);
+      if (meta.points.lidar_id) {
+        const lidBuf = await fetchBin(`${SCENE_ROOT}/${frameDir}/${meta.points.lidar_id}`);
+        ptLidar = new Uint8Array(lidBuf);
+      }
       buildPoints();
       ptsNote = ptLabels.length.toLocaleString();
       // data-driven axis help
@@ -693,6 +963,10 @@ async function loadFrame(frameEntry) {
       ptsNote = `export broken: ${e}`;
     }
   }
+  syncColorModeUi();
+  updateRoiHelper();
+  // re-apply color/ROI filters now that points+occ are both loaded
+  rebuildColoredViews();
 
   el.sceneInfo.innerHTML = `
     <div>occ voxels: <b>${occLabels ? occLabels.length.toLocaleString() : meta.n_occ.toLocaleString()}</b></div>
@@ -849,6 +1123,50 @@ el.btnResetOcc.addEventListener("click", () => {
 el.btnFit.addEventListener("click", () => {
   if (currentMeta) fitCamera(currentMeta);
 });
+
+function onColorOrFilterChange() {
+  syncColorModeUi();
+  rebuildColoredViews();
+  setStatus(`color=${colorModeValue()} · ROI clip=${el.togRoiClip && el.togRoiClip.checked}`);
+}
+
+if (el.colorMode) el.colorMode.addEventListener("change", onColorOrFilterChange);
+for (const id of ["togDyn", "togSta", "togFree", "togNoise", "togLid1", "togLid2", "togLid14"]) {
+  if (el[id]) el[id].addEventListener("change", onColorOrFilterChange);
+}
+if (el.btnApplyRoi) {
+  el.btnApplyRoi.addEventListener("click", () => {
+    readRoiFromInputs();
+    rebuildColoredViews();
+    setStatus(
+      `ROI x[${roi.x0},${roi.x1}] y[${roi.y0},${roi.y1}] z[${roi.z0},${roi.z1}]`
+    );
+  });
+}
+if (el.btnResetRoi) {
+  el.btnResetRoi.addEventListener("click", () => {
+    el.roiX0.value = -24;
+    el.roiX1.value = 24;
+    el.roiY0.value = -25;
+    el.roiY1.value = 150;
+    el.roiZ0.value = -5;
+    el.roiZ1.value = 3;
+    readRoiFromInputs();
+    rebuildColoredViews();
+    setStatus("ROI reset to default [-24,24]×[-25,150]×[-5,3]");
+  });
+}
+if (el.togRoiBox) {
+  el.togRoiBox.addEventListener("change", () => updateRoiHelper());
+}
+if (el.togRoiClip) {
+  el.togRoiClip.addEventListener("change", () => {
+    rebuildColoredViews();
+  });
+}
+syncColorModeUi();
+readRoiFromInputs();
+updateRoiHelper();
 
 let vidPollTimer = null;
 

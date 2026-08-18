@@ -177,8 +177,54 @@
           <div class="hint" id="sceneInfo">Loading…</div>
         </div>
         <div class="row">
+          <h2>Color mode</h2>
+          <label class="ctrl">Mode
+            <select id="colorMode">
+              <option value="fine" selected>Fine 22-class</option>
+              <option value="coarse">Coarse 4-class</option>
+              <option value="lidar">Lidar id (points)</option>
+            </select>
+          </label>
+          <div class="hint" style="margin-top:6px">
+            Coarse: dynamic / static / freespace / noise<br/>
+            Lidar: 1 / 2 / 14 (points only; occ stays semantic)
+          </div>
+          <div id="coarseToggles" style="margin-top:8px; display:none">
+            <label class="ctrl"><input type="checkbox" id="togDyn" checked /> dynamic</label>
+            <label class="ctrl"><input type="checkbox" id="togSta" checked /> static</label>
+            <label class="ctrl"><input type="checkbox" id="togFree" checked /> freespace</label>
+            <label class="ctrl"><input type="checkbox" id="togNoise" checked /> noise</label>
+          </div>
+          <div id="lidarToggles" style="margin-top:8px; display:none">
+            <label class="ctrl"><input type="checkbox" id="togLid1" checked /> <span style="color:#28b4ff">lidar_1</span></label>
+            <label class="ctrl"><input type="checkbox" id="togLid2" checked /> <span style="color:#28dc28">lidar_2</span></label>
+            <label class="ctrl"><input type="checkbox" id="togLid14" checked /> <span style="color:#ff2828">lidar_14</span></label>
+          </div>
+        </div>
+        <div class="row">
           <h2>Class legend</h2>
           <div class="legend" id="classLegend"><span class="hint">Loading…</span></div>
+        </div>
+        <div class="row">
+          <h2>ROI (vehicle xyz)</h2>
+          <div class="hint">Default [-24,24]×[-25,150]×[-5,3]</div>
+          <div style="display:grid; grid-template-columns:auto 1fr 1fr; gap:4px 6px; margin-top:8px; align-items:center">
+            <span class="hint">x</span>
+            <input type="number" id="roiX0" step="1" value="-24" style="width:100%" />
+            <input type="number" id="roiX1" step="1" value="24" style="width:100%" />
+            <span class="hint">y</span>
+            <input type="number" id="roiY0" step="1" value="-25" style="width:100%" />
+            <input type="number" id="roiY1" step="1" value="150" style="width:100%" />
+            <span class="hint">z</span>
+            <input type="number" id="roiZ0" step="0.5" value="-5" style="width:100%" />
+            <input type="number" id="roiZ1" step="0.5" value="3" style="width:100%" />
+          </div>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px">
+            <button type="button" id="btnApplyRoi">Apply ROI</button>
+            <button type="button" id="btnResetRoi">Reset default</button>
+          </div>
+          <label class="ctrl" style="margin-top:8px"><input type="checkbox" id="togRoiBox" checked /> Show ROI box</label>
+          <label class="ctrl" style="margin-top:8px"><input type="checkbox" id="togRoiClip" checked /> Clip display to ROI</label>
         </div>
         <div class="row">
           <h2>Axes = vehicle coords</h2>
