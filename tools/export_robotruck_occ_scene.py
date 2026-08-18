@@ -95,9 +95,42 @@ def write_i32(path: Path, arr: np.ndarray) -> None:
     path.write_bytes(np.asarray(arr, dtype=np.int32).reshape(-1).tobytes())
 
 
+def asset_ref(uri: str, dtype: str, shape: list) -> dict:
+    return {
+        "uri": uri,
+        "dtype": dtype,
+        "shape": list(shape),
+        "byte_order": "little",
+    }
+
+
+def coarse_taxonomy() -> dict:
+    # 0 dynamic, 1 static, 2 freespace, 3 noise
+    fine_to_coarse = []
+    dynamic = {0, 1, 2, 3, 4, 5, 6, 11, 12}
+    freespace = {17, 18, 19, 20, 21}
+    static = {7, 8, 9, 10, 13, 14, 15, 16}
+    for i in range(22):
+        if i in dynamic:
+            fine_to_coarse.append(0)
+        elif i in static:
+            fine_to_coarse.append(1)
+        elif i in freespace:
+            fine_to_coarse.append(2)
+        else:
+            fine_to_coarse.append(3)
+    return {
+        "names": ["dynamic", "static", "freespace", "noise"],
+        "colors_rgb": [[230, 64, 64], [64, 160, 255], [72, 200, 96], [160, 160, 160]],
+        "fine_to_coarse": fine_to_coarse,
+    }
+
+
 def export_frame(
     *,
+    clip_id: str,
     clip_dir: Path,
+    scene_root: Path,
     out_frame: Path,
     ts: str,
     pred_dir: Path,
@@ -136,6 +169,7 @@ def export_frame(
         np.save(pred_path, pred.astype(np.int32))
 
     lab_s = np.zeros((0,), np.int32)
+    lid_s = np.zeros((0,), np.int32)
     xyz_s = np.zeros((0, 3), np.float32)
     if static_agg is not None and static_agg["xyz_map"].shape[0] > 0:
         pose = (meta.get("dependency") or {}).get("ego_pose", {}).get("pose")
@@ -188,9 +222,11 @@ def export_frame(
         K_img = K.copy()
         K_img[0, :] *= sx
         K_img[1, :] *= sy
+        rel_img = f"frames/{ts}/cameras/{cam_name}.jpg"
         cameras_meta.append(
             {
                 "name": cam_name,
+                # legacy relative-to-frame path (viewer fallback)
                 "file": f"cameras/{cam_name}.jpg",
                 "width": iw,
                 "height": ih,
@@ -198,44 +234,140 @@ def export_frame(
                 "dist5": dist5.tolist(),
                 "T_c_v": T_c_v.reshape(-1).tolist(),
                 "T_v_c": T_v_c.reshape(-1).tolist(),
+                "image": {
+                    "uri": rel_img,
+                    "mime": "image/jpeg",
+                    "width": iw,
+                    "height": ih,
+                },
             }
         )
 
+    prefix = f"frames/{ts}"
     write_f32(out_frame / "occ_centers.f32.bin", grid.centers)
     write_u8(out_frame / "occ_labels.u8.bin", grid.labels.astype(np.uint8))
     write_i32(out_frame / "occ_ijk.i32.bin", grid.ijk)
     write_i32(out_frame / "occ_counts.i32.bin", grid.counts)
 
+    n_occ = int(grid.centers.shape[0])
     points_info = None
+    points_assets = None
+    n_points_exported = 0
     if export_points:
-        n = vis_xyz.shape[0]
-        if n > max_export_points:
-            rng = np.random.default_rng(0)
-            idx = rng.choice(n, size=max_export_points, replace=False)
-            p_xyz = vis_xyz[idx]
-            p_lab = vis_lab[idx]
-            p_lid = vis_lid[idx]
+        # Prefer full static_agg (pose-transformed) + frame dynamic.
+        # Deterministic static stride so scrubbing frames only moves coords.
+        if xyz_s.shape[0] > 0:
+            # re-merge explicitly for stable export ordering: static then dyn
+            dyn = np.isin(pred.astype(np.int64), list(sag.WAYMO_DYNAMIC_IDS))
+            xyz_d = coord[dyn]
+            lab_d = pred[dyn].astype(np.int32)
+            lid_d = lidar_ids[dyn]
+            n_d = int(xyz_d.shape[0])
+            n_s = int(xyz_s.shape[0])
+            max_n = int(max_export_points)
+            if n_s + n_d <= max_n:
+                p_xyz = np.concatenate([xyz_s, xyz_d], axis=0) if n_d else xyz_s
+                p_lab = np.concatenate([lab_s, lab_d], axis=0) if n_d else lab_s
+                p_lid = np.concatenate([lid_s, lid_d], axis=0) if n_d else lid_s
+            else:
+                budget_s = max(max_n // 4, max_n - n_d)
+                budget_s = min(budget_s, max_n)
+                if n_d > max_n - budget_s:
+                    rng = np.random.default_rng(0)
+                    di = rng.choice(n_d, size=max_n - budget_s, replace=False)
+                    xyz_d, lab_d, lid_d = xyz_d[di], lab_d[di], lid_d[di]
+                    budget_s = max_n - xyz_d.shape[0]
+                if n_s > budget_s:
+                    step = int(np.ceil(n_s / max(1, budget_s)))
+                    si = np.arange(0, n_s, step)[:budget_s]
+                    xyz_s_e, lab_s_e, lid_s_e = xyz_s[si], lab_s[si], lid_s[si]
+                else:
+                    xyz_s_e, lab_s_e, lid_s_e = xyz_s, lab_s, lid_s
+                p_xyz = np.concatenate([xyz_s_e, xyz_d], axis=0)
+                p_lab = np.concatenate([lab_s_e, lab_d], axis=0)
+                p_lid = np.concatenate([lid_s_e, lid_d], axis=0)
         else:
-            p_xyz, p_lab, p_lid = vis_xyz, vis_lab, vis_lid
+            n = vis_xyz.shape[0]
+            if n > max_export_points:
+                rng = np.random.default_rng(0)
+                idx = rng.choice(n, size=max_export_points, replace=False)
+                p_xyz = vis_xyz[idx]
+                p_lab = vis_lab[idx]
+                p_lid = vis_lid[idx]
+            else:
+                p_xyz, p_lab, p_lid = vis_xyz, vis_lab, vis_lid
         write_f32(out_frame / "points_xyz.f32.bin", p_xyz)
         write_u8(out_frame / "points_labels.u8.bin", np.asarray(p_lab, dtype=np.uint8))
         write_u8(out_frame / "points_lidar_id.u8.bin", np.asarray(p_lid, dtype=np.uint8))
+        n_points_exported = int(p_xyz.shape[0])
         points_info = {
-            "n": int(p_xyz.shape[0]),
+            "n": n_points_exported,
             "xyz": "points_xyz.f32.bin",
             "labels": "points_labels.u8.bin",
             "lidar_id": "points_lidar_id.u8.bin",
         }
+        points_assets = {
+            "n": n_points_exported,
+            "xyz": asset_ref(f"{prefix}/points_xyz.f32.bin", "float32", [n_points_exported, 3]),
+            "labels": asset_ref(f"{prefix}/points_labels.u8.bin", "uint8", [n_points_exported]),
+            "lidar_id": asset_ref(
+                f"{prefix}/points_lidar_id.u8.bin", "uint8", [n_points_exported]
+            ),
+        }
 
     pose = (meta.get("dependency") or {}).get("ego_pose", {}).get("pose")
+    origin = [float(x_range[0]), float(y_range[0]), float(z_range[0])]
     frame_meta = {
+        "schema_version": "robotruck_occ_frame/v1",
+        "scene_id": clip_id,
+        "frame_id": ts,
         "timestamp": ts,
+        "coordinate": {
+            "frame": "vehicle",
+            "x": "lateral",
+            "y": "forward",
+            "z": "up",
+        },
+        "grid": {
+            "voxel": float(grid.voxel),
+            "x_range": list(x_range),
+            "y_range": list(y_range),
+            "z_range": list(z_range),
+            "shape": list(grid.shape),
+            "origin": origin,
+            "index_rule": (
+                "ijk = floor((p - origin) / voxel); "
+                "center = origin + (ijk + 0.5) * voxel"
+            ),
+        },
+        "stats": {
+            "n_occ": n_occ,
+            "n_static_roi": int(xyz_s.shape[0]),
+            "n_vis_points": int(vis_xyz.shape[0]),
+            "n_points_exported": n_points_exported,
+        },
+        "assets": {
+            "occupancy": {
+                "n": n_occ,
+                "ijk": asset_ref(f"{prefix}/occ_ijk.i32.bin", "int32", [n_occ, 3]),
+                "labels": asset_ref(f"{prefix}/occ_labels.u8.bin", "uint8", [n_occ]),
+                "centers": asset_ref(
+                    f"{prefix}/occ_centers.f32.bin", "float32", [n_occ, 3]
+                ),
+                "counts": asset_ref(f"{prefix}/occ_counts.i32.bin", "int32", [n_occ]),
+            },
+            "points": points_assets,
+            "cameras": cameras_meta,
+        },
+        "ego_pose": pose,
+        "taxonomy_ref": "index.json#taxonomy",
+        # ---- legacy fields (viewer / tools backward compatible) ----
         "voxel": float(grid.voxel),
         "x_range": list(x_range),
         "y_range": list(y_range),
         "z_range": list(z_range),
         "occ_shape": list(grid.shape),
-        "n_occ": int(grid.centers.shape[0]),
+        "n_occ": n_occ,
         "n_static_roi": int(xyz_s.shape[0]),
         "n_vis_points": int(vis_xyz.shape[0]),
         "occupancy": {
@@ -246,16 +378,18 @@ def export_frame(
         },
         "points": points_info,
         "cameras": cameras_meta,
-        "ego_pose": pose,
         "class_names": list(vis.WAYMO_NAMES),
         "class_colors_rgb": (vis.WAYMO_COLORS * 255.0).astype(np.uint8).tolist(),
-        "vehicle_frame": "+y forward, +x right, +z up",
+        "vehicle_frame": "+y forward, +x lateral, +z up",
     }
     (out_frame / "meta.json").write_text(json.dumps(frame_meta, indent=2))
     return {
         "timestamp": ts,
-        "n_occ": frame_meta["n_occ"],
+        "frame_id": ts,
+        "n_occ": n_occ,
+        "n_points": n_points_exported,
         "n_cameras": len(cameras_meta),
+        "meta_uri": f"{prefix}/meta.json",
         "path": str(out_frame),
     }
 
@@ -358,17 +492,83 @@ def main() -> int:
                 use_oracle_boxes=True,
             )
         print(f"static_agg N={static_agg['xyz_map'].shape[0]}")
+        # Mirror static_agg into the scene package (map frame; frames only apply pose).
+        n_sa = int(static_agg["xyz_map"].shape[0])
+        if n_sa == 0:
+            index_static_agg = None
+        else:
+            sa_dir = scene_root / "static_agg"
+            sa_dir.mkdir(parents=True, exist_ok=True)
+            xyz_m = static_agg["xyz_map"]
+            lab_m = static_agg["labels"].astype(np.uint8)
+            lid_m = static_agg["lidar_ids"].astype(np.uint8)
+            xyz_m.astype(np.float32).tofile(sa_dir / "xyz_map.f32.bin")
+            lab_m.tofile(sa_dir / "labels.u8.bin")
+            lid_m.tofile(sa_dir / "lidar_id.u8.bin")
+            index_static_agg = {
+                "voxel": float(static_agg.get("voxel", args.static_voxel)),
+                "n": n_sa,
+                "xyz_map": {
+                    "uri": "static_agg/xyz_map.f32.bin",
+                    "dtype": "float32",
+                    "shape": [n_sa, 3],
+                },
+                "labels": {
+                    "uri": "static_agg/labels.u8.bin",
+                    "dtype": "uint8",
+                    "shape": [n_sa],
+                },
+                "lidar_id": {
+                    "uri": "static_agg/lidar_id.u8.bin",
+                    "dtype": "uint8",
+                    "shape": [n_sa],
+                },
+                "note": "Clip-level static in map frame; each frame only applies ego_pose.",
+            }
+    else:
+        index_static_agg = None
+
+    from datetime import datetime, timezone
 
     index = {
+        "schema_version": "robotruck_occ_scene/v1",
+        "scene_id": args.clip,
+        "clip_id": args.clip,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "defaults": {
+            "occ_voxel": args.occ_voxel,
+            "roi": {"x": [-24.0, 24.0], "y": [-25.0, 150.0], "z": [-5.0, 3.0]},
+            "vehicle_frame": {
+                "x": "lateral",
+                "y": "forward",
+                "z": "up",
+            },
+        },
+        "taxonomy": {
+            "fine": {
+                "n": len(vis.WAYMO_NAMES),
+                "names": list(vis.WAYMO_NAMES),
+                "colors_rgb": (vis.WAYMO_COLORS * 255.0).astype(np.uint8).tolist(),
+            },
+            "coarse": coarse_taxonomy(),
+            "lidar_ids": {
+                "ids": [1, 2, 14],
+                "colors_rgb": [[40, 180, 255], [40, 220, 40], [255, 40, 40]],
+            },
+        },
+        "frames": [],
         "clip": args.clip,
         "occ_voxel": args.occ_voxel,
-        "frames": [],
         "viewer_hint": "python tools/occ_viewer/serve.py --scene " + str(scene_root),
     }
+    if index_static_agg is not None:
+        index["static_agg"] = index_static_agg
     for i, ts in enumerate(timestamps):
         out_frame = scene_root / "frames" / ts
         info = export_frame(
+            clip_id=args.clip,
             clip_dir=clip_dir,
+            scene_root=scene_root,
             out_frame=out_frame,
             ts=ts,
             pred_dir=pred_dir,
@@ -386,17 +586,28 @@ def main() -> int:
             max_export_points=args.max_export_points,
         )
         index["frames"].append(
-            {"timestamp": ts, "dir": f"frames/{ts}", "n_occ": info["n_occ"]}
+            {
+                "frame_id": info["frame_id"],
+                "timestamp": ts,
+                "meta_uri": info["meta_uri"],
+                "dir": f"frames/{ts}",
+                "n_occ": info["n_occ"],
+                "n_points": info["n_points"],
+            }
         )
         print(f"  [{i+1}/{len(timestamps)}] ts={ts} n_occ={info['n_occ']}", flush=True)
 
     (scene_root / "index.json").write_text(json.dumps(index, indent=2))
-    # convenience copy of viewer into scene (optional symlink-like copy of note)
+    schema_src = ROOT / "tools" / "occ_viewer" / "SCHEMA.md"
+    if schema_src.is_file():
+        shutil.copy2(schema_src, scene_root / "SCHEMA.md")
     (scene_root / "README.txt").write_text(
+        "Robotruck occ scene package (schema robotruck_occ_scene/v1).\n"
+        "See SCHEMA.md for Mongo-ready asset URIs.\n\n"
         "Open viewer:\n"
         f"  cd {ROOT}\n"
         f"  .venv_smoke/bin/python tools/occ_viewer/serve.py --scene {scene_root}\n"
-        "Then open the printed URL.\n"
+        "  http://127.0.0.1:8765/?scene=/scene\n"
     )
     print(f"done -> {scene_root}")
     return 0

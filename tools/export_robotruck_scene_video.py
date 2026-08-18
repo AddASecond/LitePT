@@ -60,7 +60,10 @@ def labels_to_bgr(labels: np.ndarray, colors_rgb: list) -> np.ndarray:
     out = np.zeros((lab.shape[0], 3), dtype=np.uint8)
     valid = (lab >= 0) & (lab < n)
     idx = lab[valid]
-    rgb = np.asarray([colors_rgb[i] for i in idx], dtype=np.uint8)
+    rgb = np.asarray([colors_rgb[i] for i in idx], dtype=np.float64)
+    if rgb.size and float(np.nanmax(rgb)) <= 1.5:
+        rgb = rgb * 255.0
+    rgb = np.clip(np.rint(rgb), 0, 255).astype(np.uint8)
     out[valid] = rgb[:, ::-1]  # RGB → BGR
     return out
 
@@ -113,6 +116,49 @@ def project_centers(
     return uv[inside], z[inside], idx[inside]
 
 
+def _project_corners_batch(
+    corners_xyz: np.ndarray,
+    K: np.ndarray,
+    dist5: np.ndarray,
+    T_c_v: np.ndarray,
+    *,
+    near_z: float = 1.0,
+    max_r2: float = 1.2,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project (N,8,3) vehicle-frame corners → uv (N,8,2), z (N,8), valid (N,8).
+
+    max_r2 only guards radtan blow-ups (not a circular image mask). Use a
+    generous default so wide pinhole cams keep full rectangular FOV.
+    """
+    n = corners_xyz.shape[0]
+    flat = corners_xyz.reshape(-1, 3)
+    ones = np.ones((flat.shape[0], 1), dtype=np.float64)
+    hv = np.hstack([flat.astype(np.float64), ones])
+    pc = (T_c_v @ hv.T).T[:, :3]
+    z = pc[:, 2]
+    xn = np.zeros(flat.shape[0], dtype=np.float64)
+    yn = np.zeros_like(xn)
+    valid = z > near_z
+    np.divide(pc[:, 0], z, out=xn, where=valid)
+    np.divide(pc[:, 1], z, out=yn, where=valid)
+    r2 = xn * xn + yn * yn
+    valid &= r2 <= max_r2
+    k1, k2, p1, p2, k3 = [float(dist5[i]) if i < len(dist5) else 0.0 for i in range(5)]
+    r4 = r2 * r2
+    r6 = r4 * r2
+    radial = 1 + k1 * r2 + k2 * r4 + k3 * r6
+    valid &= np.isfinite(radial) & (np.abs(radial) <= 20)
+    xpp = xn * radial + 2 * p1 * xn * yn + p2 * (r2 + 2 * xn * xn)
+    ypp = yn * radial + p1 * (r2 + 2 * yn * yn) + 2 * p2 * xn * yn
+    fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
+    u = fx * xpp + cx
+    v = fy * ypp + cy
+    uv = np.stack([u, v], axis=1).reshape(n, 8, 2)
+    zz = z.reshape(n, 8)
+    ok = valid.reshape(n, 8) & np.isfinite(uv).all(axis=-1)
+    return uv, zz, ok
+
+
 def overlay_occ_squares(
     image_bgr: np.ndarray,
     centers: np.ndarray,
@@ -123,35 +169,106 @@ def overlay_occ_squares(
     T_c_v: np.ndarray,
     voxel: float,
     alpha: float = 0.55,
-    max_n: int = 120000,
+    max_n: int = 60000,
+    ijk: np.ndarray | None = None,
+    x_range: tuple[float, float] | None = None,
+    y_range: tuple[float, float] | None = None,
+    z_range: tuple[float, float] | None = None,
 ) -> np.ndarray:
-    """Draw occupancy as perspective squares (side ≈ voxel*fx/z), not dots."""
-    h, w = image_bgr.shape[:2]
-    uv, z, keep = project_centers(centers, K, dist5, T_c_v, w, h, max_n=max_n)
-    if uv.shape[0] == 0:
+    """Project each occupied voxel cube (8 corners → convex hull) onto the image.
+
+    Matches tools/occ_viewer/app.js projectOccCubes (cull behind-cam / wings /
+    oversized silhouettes; rectangular FOV only — no circular r² mask).
+    """
+    if ijk is None or x_range is None or y_range is None or z_range is None:
         return image_bgr
-    cols = labels_to_bgr(labels[keep], colors_rgb)
-    order = np.argsort(-z)
-    uv, z, cols = uv[order], z[order], cols[order]
-    fx = float(K[0, 0])
+
+    v = float(voxel)
+    x0, y0, z0 = float(x_range[0]), float(y_range[0]), float(z_range[0])
+    ijk = np.asarray(ijk, dtype=np.int32).reshape(-1, 3)
+    labels = np.asarray(labels).reshape(-1)
+    n = ijk.shape[0]
+    if n == 0:
+        return image_bgr
+    # Same as viewer: deterministic stride, not random subsample.
+    if n > max_n:
+        step = int(np.ceil(n / max_n))
+        ijk = ijk[::step]
+        labels = labels[::step]
+        n = ijk.shape[0]
+
+    ix = ijk[:, 0].astype(np.float64)
+    iy = ijk[:, 1].astype(np.float64)
+    iz = ijk[:, 2].astype(np.float64)
+    xa, xb = x0 + ix * v, x0 + (ix + 1) * v
+    ya, yb = y0 + iy * v, y0 + (iy + 1) * v
+    za, zb = z0 + iz * v, z0 + (iz + 1) * v
+    # (N,8,3) cube corners
+    corners = np.stack(
+        [
+            np.stack([xa, ya, za], axis=1),
+            np.stack([xb, ya, za], axis=1),
+            np.stack([xb, yb, za], axis=1),
+            np.stack([xa, yb, za], axis=1),
+            np.stack([xa, ya, zb], axis=1),
+            np.stack([xb, ya, zb], axis=1),
+            np.stack([xb, yb, zb], axis=1),
+            np.stack([xa, yb, zb], axis=1),
+        ],
+        axis=1,
+    )
+    uv, zz, ok = _project_corners_batch(corners, K, dist5, T_c_v)
+    h, w = image_bgr.shape[:2]
+    u_lo, u_hi = -0.02 * w, 1.02 * w
+    v_lo, v_hi = -0.02 * h, 1.02 * h
+    max_span = 0.12 * max(w, h)
+    # Voxel centers must project inside the image (avoids wing artifacts).
+    ctr = np.stack(
+        [0.5 * (xa + xb), 0.5 * (ya + yb), 0.5 * (za + zb)], axis=1
+    )
+    # reuse 8-corner batch by repeating center 8x (wasteful but simple/correct)
+    ctr8 = np.repeat(ctr[:, None, :], 8, axis=1)
+    uv_c, zz_c, ok_c = _project_corners_batch(ctr8, K, dist5, T_c_v)
+    uv_c = uv_c[:, 0, :]
+    ok_c = ok_c[:, 0]
+    center_in = (
+        ok_c
+        & (uv_c[:, 0] >= 0)
+        & (uv_c[:, 0] < w)
+        & (uv_c[:, 1] >= 0)
+        & (uv_c[:, 1] < h)
+    )
+    in_fov = (
+        (uv[:, :, 0] >= u_lo)
+        & (uv[:, :, 0] <= u_hi)
+        & (uv[:, :, 1] >= v_lo)
+        & (uv[:, :, 1] <= v_hi)
+    )
+    span_u = uv[:, :, 0].max(axis=1) - uv[:, :, 0].min(axis=1)
+    span_v = uv[:, :, 1].max(axis=1) - uv[:, :, 1].min(axis=1)
+    span_ok = (span_u <= max_span) & (span_v <= max_span)
+    zmean = zz.mean(axis=1)
+    expect = (2.5 * v * float(K[0, 0])) / np.maximum(zmean, 1.0)
+    size_ok = (span_u <= np.maximum(24.0, 3.0 * expect)) & (
+        span_v <= np.maximum(24.0, 3.0 * expect)
+    )
+    keep = ok.all(axis=1) & in_fov.all(axis=1) & span_ok & size_ok & center_in
+    cols = labels_to_bgr(labels, colors_rgb)
     overlay = image_bgr.copy()
-    for (u, v), zz, c in zip(uv, z, cols):
-        side = float(voxel) * fx / max(float(zz), 0.3)
-        side = float(np.clip(side, 1.0, 180.0))
-        half = 0.5 * side
-        x0 = int(round(u - half))
-        y0 = int(round(v - half))
-        x1 = int(round(u + half))
-        y1 = int(round(v + half))
-        if x1 < 0 or y1 < 0 or x0 >= w or y0 >= h:
+    items = []
+    for i in np.where(keep)[0]:
+        pts = uv[i].astype(np.float32)
+        zmean = float(zz[i].mean())
+        hull = cv2.convexHull(pts.reshape(-1, 1, 2))
+        if hull is None or len(hull) < 3:
             continue
-        cv2.rectangle(
-            overlay,
-            (max(0, x0), max(0, y0)),
-            (min(w - 1, x1), min(h - 1, y1)),
-            (int(c[0]), int(c[1]), int(c[2])),
-            -1,
-        )
+        items.append((zmean, hull, cols[i]))
+    items.sort(key=lambda t: -t[0])
+    for _, hull, col in items:
+        poly = np.rint(hull.reshape(-1, 2)).astype(np.int32)
+        if poly.shape[0] < 3:
+            continue
+        cv2.fillConvexPoly(overlay, poly, (int(col[0]), int(col[1]), int(col[2])))
     return cv2.addWeighted(overlay, alpha, image_bgr, 1.0 - alpha, 0)
 
 
@@ -182,16 +299,38 @@ def overlay_points_pixels(
 
 
 def load_frame_occ(frame_dir: Path, meta: dict) -> occmod.OccupancyGrid:
-    occ = meta["occupancy"]
-    centers = _read_f32(frame_dir / occ["centers"], True)
-    labels = _read_u8(frame_dir / occ["labels"]).astype(np.int32)
-    ijk = _read_i32(frame_dir / occ["ijk"], True)
-    counts = _read_i32(frame_dir / occ["counts"], False)
-    voxel = float(meta["voxel"])
-    x_range = tuple(meta["x_range"])
-    y_range = tuple(meta["y_range"])
-    z_range = tuple(meta["z_range"])
-    shape = tuple(meta.get("occ_shape") or [1, 1, 1])
+    if meta.get("grid"):
+        voxel = float(meta["grid"]["voxel"])
+        x_range = tuple(meta["grid"]["x_range"])
+        y_range = tuple(meta["grid"]["y_range"])
+        z_range = tuple(meta["grid"]["z_range"])
+        shape = tuple(meta["grid"].get("shape") or [1, 1, 1])
+    else:
+        voxel = float(meta["voxel"])
+        x_range = tuple(meta["x_range"])
+        y_range = tuple(meta["y_range"])
+        z_range = tuple(meta["z_range"])
+        shape = tuple(meta.get("occ_shape") or [1, 1, 1])
+
+    if meta.get("assets") and meta["assets"].get("occupancy"):
+        occ = meta["assets"]["occupancy"]
+        # uri is scene-root relative; frame_dir is .../frames/ts
+        scene_root = frame_dir.parent.parent
+
+        def _uri(key):
+            u = occ[key]["uri"]
+            return scene_root / u
+
+        centers = _read_f32(_uri("centers"), True)
+        labels = _read_u8(_uri("labels")).astype(np.int32)
+        ijk = _read_i32(_uri("ijk"), True)
+        counts = _read_i32(_uri("counts"), False)
+    else:
+        occ = meta["occupancy"]
+        centers = _read_f32(frame_dir / occ["centers"], True)
+        labels = _read_u8(frame_dir / occ["labels"]).astype(np.int32)
+        ijk = _read_i32(frame_dir / occ["ijk"], True)
+        counts = _read_i32(frame_dir / occ["counts"], False)
     max_z = centers[:, 2].astype(np.float32) if centers.size else np.zeros((0,), np.float32)
     return occmod.OccupancyGrid(
         ijk=ijk,
@@ -297,7 +436,9 @@ def export_scene_video(
     videos_dir = scene_dir / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
     clip = index.get("clip") or scene_dir.name
-    stem = f"{clip}_scene_{mode}_v{index.get('occ_voxel', 'x')}"
+    # proj=hull2: cube corners → convex hull (viewer-parity). Old exports used
+    # axis-aligned squares from voxel centers — do not overwrite those names.
+    stem = f"{clip}_scene_{mode}_v{index.get('occ_voxel', 'x')}_hull2"
     if out_path is None:
         out_path = videos_dir / f"{stem}.mp4"
     else:
@@ -309,9 +450,14 @@ def export_scene_video(
     for i, fr in enumerate(frames):
         frame_dir = scene_dir / fr["dir"]
         meta = json.loads((frame_dir / "meta.json").read_text())
-        colors_rgb = meta.get("class_colors_rgb") or []
-        names = meta.get("class_names") or []
-        voxel = float(meta["voxel"])
+        tax = (index.get("taxonomy") or {}).get("fine") or {}
+        colors_rgb = (
+            tax.get("colors_rgb")
+            or meta.get("class_colors_rgb")
+            or []
+        )
+        names = tax.get("names") or meta.get("class_names") or []
+        voxel = float((meta.get("grid") or {}).get("voxel") or meta.get("voxel") or 0.2)
         grid = load_frame_occ(frame_dir, meta)
         colors_bgr = labels_to_bgr(grid.labels, colors_rgb)
 
@@ -340,6 +486,10 @@ def export_scene_video(
                     dist5,
                     T_c_v,
                     voxel,
+                    ijk=grid.ijk,
+                    x_range=grid.x_range,
+                    y_range=grid.y_range,
+                    z_range=grid.z_range,
                 )
             if mode in ("points", "both") and pts_xyz is not None:
                 img = overlay_points_pixels(

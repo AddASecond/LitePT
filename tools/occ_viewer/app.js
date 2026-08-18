@@ -2,10 +2,49 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
 const qs = new URLSearchParams(location.search);
-const SCENE_ROOT = (qs.get("scene") || "/scene").replace(/\/$/, "");
+/** Active scene HTTP prefix, e.g. /scenes/<clip_id> or /scene */
+let sceneRoot = (qs.get("scene") || "").replace(/\/$/, "");
+let clipsCatalog = [];
+let frameIndex = 0;
+
+/** Resolve asset URI relative to scene root (Mongo/S3 can swap to absolute later). */
+function assetUrl(uri, frameRelFallback = null) {
+  if (!uri) return null;
+  if (/^(https?:|data:|blob:|gridfs:|s3:)/i.test(uri)) return uri;
+  if (uri.startsWith("/")) return uri;
+  // scene-root relative (v1)
+  if (uri.startsWith("frames/")) return `${sceneRoot}/${uri}`;
+  // legacy: relative to frame dir
+  if (frameRelFallback) return `${sceneRoot}/${frameRelFallback}/${uri}`;
+  return `${sceneRoot}/${uri}`;
+}
+
+function occAsset(meta, key) {
+  const a = meta.assets && meta.assets.occupancy && meta.assets.occupancy[key];
+  if (a && a.uri) return assetUrl(a.uri);
+  if (meta.occupancy && meta.occupancy[key]) return assetUrl(meta.occupancy[key], frameDir);
+  return null;
+}
+
+function pointsAsset(meta, key) {
+  const a = meta.assets && meta.assets.points && meta.assets.points[key];
+  if (a && a.uri) return assetUrl(a.uri);
+  if (meta.points && meta.points[key]) return assetUrl(meta.points[key], frameDir);
+  return null;
+}
+
+function camImageUrl(cam) {
+  if (cam.image && cam.image.uri) return assetUrl(cam.image.uri);
+  if (cam.file) return assetUrl(cam.file, frameDir);
+  return null;
+}
 
 const el = {
   frameSelect: document.getElementById("frameSelect"),
+  clipSelect: document.getElementById("clipSelect"),
+  btnPrevFrame: document.getElementById("btnPrevFrame"),
+  btnNextFrame: document.getElementById("btnNextFrame"),
+  framePos: document.getElementById("framePos"),
   titleMeta: document.getElementById("titleMeta"),
   sceneInfo: document.getElementById("sceneInfo"),
   status: document.getElementById("status"),
@@ -80,16 +119,20 @@ let occIjk = null; // Int32 ix,iy,iz
 let occLabels = null;
 let occCenters = null; // for projection
 let occProjLabels = null; // filtered labels parallel to occCenters
+let occProjIjk = null; // filtered ijk parallel to occCenters (for neat quads)
 let activeVoxel = null;
 let exportedOcc = null; // { voxel, ijk: Int32Array, labels: Uint8Array }
 let ptXYZ = null;
 let ptLabels = null;
 let ptLidar = null; // Uint8Array lidar_id per point
+/** Clip-level static in map frame (same points every frame; only pose changes). */
+let staticAgg = null; // { xyz: Float32Array, labels: Uint8Array, lidar: Uint8Array, n, voxel }
 let roiHelper = null;
 let roi = { x0: -24, x1: 24, y0: -25, y1: 150, z0: -5, z1: 3 };
 
 /** Coarse 4-class mapping (Waymo 22 → dynamic/static/freespace/noise) */
 const COARSE_DYNAMIC = new Set([0, 1, 2, 3, 4, 5, 6, 11, 12]);
+const FINE_DYNAMIC = COARSE_DYNAMIC;
 const COARSE_FREESPACE = new Set([17, 18, 19, 20, 21]);
 const COARSE_STATIC = new Set([7, 8, 9, 10, 13, 14, 15, 16]);
 const COARSE_COLORS = {
@@ -125,13 +168,16 @@ sun.position.set(40, 120, -30);
 scene.add(sun);
 
 /**
- * Vehicle coords (from data files): x,y,z as stored.
- * Three.js: X right on screen when looking -Z, Y up, Z toward camera.
- * Map: Three(x,y,z) = (veh.x, veh.z, veh.y)
- * so ground XY (z≈0) lies on Three XZ with Y-up — default GridHelper plane.
+ * Vehicle → Three.js display frame.
+ * Vehicle: +x right, +y forward, +z up.
+ * Three: Y-up, ground on XZ. Remap (x,y,z)_veh → (-x, z, y)_three so that
+ * when the default camera sits behind ego looking along +Z (= forward),
+ * vehicle +x lands on screen-right — matching camera images.
+ * (A plain (x,z,y) map flips L/R: Three lookAt(+Z) makes camera-right = −X.)
+ * Cam projection still uses raw vehicle xyz (unchanged).
  */
 function vehToThree(x, y, z, out = new THREE.Vector3()) {
-  return out.set(x, z, y);
+  return out.set(-x, z, y);
 }
 
 gridHelper = new THREE.GridHelper(400, 80, 0x445066, 0x243041);
@@ -167,15 +213,13 @@ function makeSprite(text, pos, color) {
 function buildAxes() {
   if (axesGroup) scene.remove(axesGroup);
   axesGroup = new THREE.Group();
-  // +X veh → Three +X
-  axesGroup.add(makeAxisArrow(new THREE.Vector3(1, 0, 0), 0xff4d4d, 20));
-  // +Y veh → Three +Z
+  // Directions in Three space after vehToThree (vehicle +x → Three −X).
+  axesGroup.add(makeAxisArrow(new THREE.Vector3(-1, 0, 0), 0xff4d4d, 20));
   axesGroup.add(makeAxisArrow(new THREE.Vector3(0, 0, 1), 0x3dde6a, 20));
-  // +Z veh → Three +Y
   axesGroup.add(makeAxisArrow(new THREE.Vector3(0, 1, 0), 0x4da3ff, 20));
-  axesGroup.add(makeSprite("+X", new THREE.Vector3(22, 0.8, 0), "#ff4d4d"));
-  axesGroup.add(makeSprite("+Y", new THREE.Vector3(0, 0.8, 22), "#3dde6a"));
-  axesGroup.add(makeSprite("+Z", new THREE.Vector3(0, 22, 0), "#4da3ff"));
+  axesGroup.add(makeSprite("+X", vehToThree(22, 0, 0.8), "#ff4d4d"));
+  axesGroup.add(makeSprite("+Y", vehToThree(0, 22, 0.8), "#3dde6a"));
+  axesGroup.add(makeSprite("+Z", vehToThree(0, 0, 22), "#4da3ff"));
   axesGroup.visible = el.togAxes.checked;
   scene.add(axesGroup);
 }
@@ -205,6 +249,187 @@ async function fetchBin(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
   return r.arrayBuffer();
+}
+
+function quatToRotMat(q) {
+  let x = +q.x,
+    y = +q.y,
+    z = +q.z,
+    w = +q.w;
+  const n = Math.hypot(x, y, z, w) || 1;
+  x /= n;
+  y /= n;
+  z /= n;
+  w /= n;
+  return [
+    1 - 2 * (y * y + z * z),
+    2 * (x * y - z * w),
+    2 * (x * z + y * w),
+    2 * (x * y + z * w),
+    1 - 2 * (x * x + z * z),
+    2 * (y * z - x * w),
+    2 * (x * z - y * w),
+    2 * (y * z + x * w),
+    1 - 2 * (x * x + y * y),
+  ];
+}
+
+/** Row-major 4x4 map←vehicle from ego_pose.pose */
+function egoPoseToTMapVehicle(pose) {
+  const R = quatToRotMat(pose.orientation);
+  const p = pose.position;
+  return new Float64Array([
+    R[0],
+    R[1],
+    R[2],
+    +p.x,
+    R[3],
+    R[4],
+    R[5],
+    +p.y,
+    R[6],
+    R[7],
+    R[8],
+    +p.z,
+    0,
+    0,
+    0,
+    1,
+  ]);
+}
+
+function invertRigid4(T) {
+  // T = [R|t]; inv = [R^T | -R^T t]
+  const R = [
+    T[0],
+    T[1],
+    T[2],
+    T[4],
+    T[5],
+    T[6],
+    T[8],
+    T[9],
+    T[10],
+  ];
+  const tx = T[3],
+    ty = T[7],
+    tz = T[11];
+  const ix = -(R[0] * tx + R[3] * ty + R[6] * tz);
+  const iy = -(R[1] * tx + R[4] * ty + R[7] * tz);
+  const iz = -(R[2] * tx + R[5] * ty + R[8] * tz);
+  return new Float64Array([
+    R[0],
+    R[3],
+    R[6],
+    ix,
+    R[1],
+    R[4],
+    R[7],
+    iy,
+    R[2],
+    R[5],
+    R[8],
+    iz,
+    0,
+    0,
+    0,
+    1,
+  ]);
+}
+
+function transformPoints(xyz, T) {
+  const n = xyz.length / 3;
+  const out = new Float32Array(xyz.length);
+  for (let i = 0; i < n; i++) {
+    const o = i * 3;
+    const x = xyz[o],
+      y = xyz[o + 1],
+      z = xyz[o + 2];
+    out[o] = T[0] * x + T[1] * y + T[2] * z + T[3];
+    out[o + 1] = T[4] * x + T[5] * y + T[6] * z + T[7];
+    out[o + 2] = T[8] * x + T[9] * y + T[10] * z + T[11];
+  }
+  return out;
+}
+
+/**
+ * Map-frame static_agg → current vehicle frame (optional crop).
+ * Same points every frame; only the rigid transform changes.
+ */
+function staticAggInVehicle(pose, xRange, yRange, zRange) {
+  if (!staticAgg || !pose) return null;
+  const T_map_v = egoPoseToTMapVehicle(pose);
+  const T_v_map = invertRigid4(T_map_v);
+  const xyz = transformPoints(staticAgg.xyz, T_v_map);
+  const n = staticAgg.n;
+  const keep = [];
+  for (let i = 0; i < n; i++) {
+    const o = i * 3;
+    const x = xyz[o],
+      y = xyz[o + 1],
+      z = xyz[o + 2];
+    if (xRange && (x < xRange[0] || x > xRange[1])) continue;
+    if (yRange && (y < yRange[0] || y > yRange[1])) continue;
+    if (zRange && (z < zRange[0] || z > zRange[1])) continue;
+    keep.push(i);
+  }
+  const m = keep.length;
+  const outX = new Float32Array(m * 3);
+  const outL = new Uint8Array(m);
+  const outI = new Uint8Array(m);
+  for (let k = 0; k < m; k++) {
+    const i = keep[k];
+    outX[k * 3] = xyz[i * 3];
+    outX[k * 3 + 1] = xyz[i * 3 + 1];
+    outX[k * 3 + 2] = xyz[i * 3 + 2];
+    outL[k] = staticAgg.labels[i];
+    outI[k] = staticAgg.lidar ? staticAgg.lidar[i] : 0;
+  }
+  return { xyz: outX, labels: outL, lidar: outI, n: m };
+}
+
+function mergeStaticAndDynamicPoints(staticPart, dynXYZ, dynLab, dynLid) {
+  const ns = staticPart ? staticPart.n : 0;
+  const nd = dynLab ? dynLab.length : 0;
+  const n = ns + nd;
+  const xyz = new Float32Array(n * 3);
+  const lab = new Uint8Array(n);
+  const lid = new Uint8Array(n);
+  if (ns) {
+    xyz.set(staticPart.xyz);
+    lab.set(staticPart.labels);
+    lid.set(staticPart.lidar);
+  }
+  for (let i = 0; i < nd; i++) {
+    const o = (ns + i) * 3;
+    const s = i * 3;
+    xyz[o] = dynXYZ[s];
+    xyz[o + 1] = dynXYZ[s + 1];
+    xyz[o + 2] = dynXYZ[s + 2];
+    lab[ns + i] = dynLab[i];
+    lid[ns + i] = dynLid ? dynLid[i] : 0;
+  }
+  return { xyz, labels: lab, lidar: lid };
+}
+
+async function loadStaticAggFromIndex() {
+  staticAgg = null;
+  const sa = index && index.static_agg;
+  if (!sa || !sa.xyz_map || !sa.labels) return;
+  const xyzBuf = await fetchBin(assetUrl(sa.xyz_map.uri));
+  const labBuf = await fetchBin(assetUrl(sa.labels.uri));
+  let lid = null;
+  if (sa.lidar_id && sa.lidar_id.uri) {
+    lid = new Uint8Array(await fetchBin(assetUrl(sa.lidar_id.uri)));
+  }
+  staticAgg = {
+    xyz: new Float32Array(xyzBuf),
+    labels: new Uint8Array(labBuf),
+    lidar: lid,
+    n: sa.n || new Uint8Array(labBuf).length,
+    voxel: sa.voxel || 0.25,
+  };
+  setStatus(`static_agg loaded · n=${staticAgg.n.toLocaleString()}`);
 }
 
 function fineToCoarse(lab) {
@@ -256,6 +481,51 @@ function lidarVisible(lid) {
   if (lid === 2) return !el.togLid2 || el.togLid2.checked;
   if (lid === 14) return !el.togLid14 || el.togLid14.checked;
   return true;
+}
+
+function normalizeClassColors(raw) {
+  if (!raw || !raw.length) return null;
+  const out = [];
+  let maxv = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (!c || c.length < 3) {
+      out.push([180, 180, 180]);
+      continue;
+    }
+    const r = Number(c[0]),
+      g = Number(c[1]),
+      b = Number(c[2]);
+    out.push([r, g, b]);
+    maxv = Math.max(maxv, r, g, b);
+  }
+  // Some exports store 0..1 floats; CSS/Three need 0..255.
+  if (maxv > 0 && maxv <= 1.5) {
+    for (let i = 0; i < out.length; i++) {
+      out[i] = [
+        Math.round(out[i][0] * 255),
+        Math.round(out[i][1] * 255),
+        Math.round(out[i][2] * 255),
+      ];
+    }
+  } else {
+    for (let i = 0; i < out.length; i++) {
+      out[i] = [
+        Math.round(out[i][0]),
+        Math.round(out[i][1]),
+        Math.round(out[i][2]),
+      ];
+    }
+  }
+  return out;
+}
+
+function resolveClassColors(meta) {
+  // Prefer scene taxonomy (stable), then per-frame meta.
+  const fromTax =
+    index && index.taxonomy && index.taxonomy.fine && index.taxonomy.fine.colors_rgb;
+  const fromMeta = meta && meta.class_colors_rgb;
+  return normalizeClassColors(fromTax || fromMeta);
 }
 
 function colorFromLabel(label) {
@@ -352,7 +622,7 @@ function updateRoiHelper() {
     roiHelper = null;
   }
   if (!el.togRoiBox || !el.togRoiBox.checked) return;
-  // Box in vehicle frame → Three: (x,z,y)
+  // Box in vehicle frame → Three via vehToThree (center); size along remapped axes.
   const cx = 0.5 * (roi.x0 + roi.x1);
   const cy = 0.5 * (roi.y0 + roi.y1);
   const cz = 0.5 * (roi.z0 + roi.z1);
@@ -423,6 +693,7 @@ function buildOccMesh() {
   if (n === 0) {
     occCenters = new Float32Array(0);
     occProjLabels = null;
+    occProjIjk = null;
     return;
   }
 
@@ -441,6 +712,7 @@ function buildOccMesh() {
   const color = new THREE.Color();
   const centers = new Float32Array(n * 3);
   const labs = new Uint8Array(n);
+  const ijks = new Int32Array(n * 3);
 
   for (let k = 0; k < n; k++) {
     const i = keepIdx[k];
@@ -451,6 +723,9 @@ function buildOccMesh() {
     centers[k * 3 + 1] = vy;
     centers[k * 3 + 2] = vz;
     labs[k] = occLabels[i];
+    ijks[k * 3] = occIjk[i * 3];
+    ijks[k * 3 + 1] = occIjk[i * 3 + 1];
+    ijks[k * 3 + 2] = occIjk[i * 3 + 2];
     vehToThree(vx, vy, vz, dummy.position);
     dummy.updateMatrix();
     mesh.setMatrixAt(k, dummy.matrix);
@@ -477,6 +752,7 @@ function buildOccMesh() {
   scene.add(mesh);
   occCenters = centers;
   occProjLabels = labs;
+  occProjIjk = ijks;
 }
 
 function voxelizeFromPoints(voxel) {
@@ -588,7 +864,8 @@ function buildPoints() {
     const i = keepIdx[k];
     const o = i * 3;
     const pk = k * 3;
-    positions[pk] = ptXYZ[o];
+    // Display uses vehToThree; proj* stay in vehicle frame for cam projection.
+    positions[pk] = -ptXYZ[o];
     positions[pk + 1] = ptXYZ[o + 2];
     positions[pk + 2] = ptXYZ[o + 1];
     projXYZ[pk] = ptXYZ[o];
@@ -639,6 +916,196 @@ function fitCamera(meta) {
   controls.update();
 }
 
+function projectOneVeh(x, y, z, cam, useDistortion = true) {
+  const K = cam.K;
+  const T = cam.T_c_v;
+  const fx = K[0],
+    fy = K[4],
+    cx = K[2],
+    cy = K[5];
+  const xc = T[0] * x + T[1] * y + T[2] * z + T[3];
+  const yc = T[4] * x + T[5] * y + T[6] * z + T[7];
+  const zc = T[8] * x + T[9] * y + T[10] * z + T[11];
+  if (zc <= 0.3) return null;
+  let xn = xc / zc;
+  let yn = yc / zc;
+  if (useDistortion) {
+    const dist = cam.dist5 || [0, 0, 0, 0, 0];
+    const k1 = dist[0] || 0,
+      k2 = dist[1] || 0,
+      p1 = dist[2] || 0,
+      p2 = dist[3] || 0,
+      k3 = dist[4] || 0;
+    const r2 = xn * xn + yn * yn;
+    // Guard extreme radtan (e.g. camera17 k3≈-3.8) outside reliable FOV.
+    if (r2 > 1.2) return null;
+    const r4 = r2 * r2;
+    const r6 = r4 * r2;
+    const radial = 1 + k1 * r2 + k2 * r4 + k3 * r6;
+    if (!Number.isFinite(radial) || Math.abs(radial) > 20) return null;
+    const xpp = xn * radial + 2 * p1 * xn * yn + p2 * (r2 + 2 * xn * xn);
+    const ypp = yn * radial + p1 * (r2 + 2 * yn * yn) + 2 * p2 * xn * yn;
+    if (!Number.isFinite(xpp) || !Number.isFinite(ypp)) return null;
+    xn = xpp;
+    yn = ypp;
+  }
+  const u = fx * xn + cx;
+  const v = fy * yn + cy;
+  if (!Number.isFinite(u) || !Number.isFinite(v)) return null;
+  return { u, v, z: zc };
+}
+
+/**
+ * Project each occupied voxel cube onto the image:
+ * 8 lattice corners → distorted UV → convex hull silhouette.
+ * Skip any cube that is behind the camera, straddles the near plane,
+ * or has a corner that flies outside a generous image FOV (avoids the
+ * huge warped polygons on side/rear cams).
+ */
+function projectOccCubes(cam, maxCells = 60000) {
+  const labs = occProjLabels || occLabels;
+  const ijks = occProjIjk;
+  if (!labs || !labs.length || !activeVoxel || !currentMeta || !ijks) return [];
+
+  const v = activeVoxel;
+  const x0 = currentMeta.x_range[0];
+  const y0 = currentMeta.y_range[0];
+  const z0 = currentMeta.z_range[0];
+  const n = labs.length;
+  let step = 1;
+  if (n > maxCells) step = Math.ceil(n / maxCells);
+  const w = cam.width || 1920;
+  const h = cam.height || 1080;
+  // Rectangular image bounds only — do NOT gate on r² (that draws a circle
+  // on wide pinhole cams and looks like a wrong fisheye model).
+  const uLo = -0.02 * w;
+  const uHi = 1.02 * w;
+  const vLo = -0.02 * h;
+  const vHi = 1.02 * h;
+  const nearZ = 1.0;
+  const maxSpan = 0.12 * Math.max(w, h);
+
+  const quads = [];
+  for (let i = 0; i < n; i += step) {
+    const ix = ijks[i * 3];
+    const iy = ijks[i * 3 + 1];
+    const iz = ijks[i * 3 + 2];
+    const xa = x0 + ix * v;
+    const xb = x0 + (ix + 1) * v;
+    const ya = y0 + iy * v;
+    const yb = y0 + (iy + 1) * v;
+    const za = z0 + iz * v;
+    const zb = z0 + (iz + 1) * v;
+    const cx = 0.5 * (xa + xb);
+    const cy = 0.5 * (ya + yb);
+    const cz = 0.5 * (za + zb);
+    const cProj = projectOneVeh(cx, cy, cz, cam, true);
+    if (!cProj || cProj.z < nearZ) continue;
+    // Center must land inside the image — otherwise corner hulls become
+    // huge radial wings (esp. camera17 / strong radtan).
+    if (cProj.u < 0 || cProj.u >= w || cProj.v < 0 || cProj.v >= h) continue;
+
+    const corners3 = [
+      [xa, ya, za],
+      [xb, ya, za],
+      [xb, yb, za],
+      [xa, yb, za],
+      [xa, ya, zb],
+      [xb, ya, zb],
+      [xb, yb, zb],
+      [xa, yb, zb],
+    ];
+    const pts = [];
+    let zSum = 0;
+    let ok = true;
+    let uMin = Infinity,
+      uMax = -Infinity,
+      vMin = Infinity,
+      vMax = -Infinity;
+    for (let c = 0; c < 8; c++) {
+      const p = projectOneVeh(
+        corners3[c][0],
+        corners3[c][1],
+        corners3[c][2],
+        cam,
+        true
+      );
+      // All 8 corners must be valid — partial cubes → huge warped shards.
+      if (!p || p.z < nearZ) {
+        ok = false;
+        break;
+      }
+      if (p.u < uLo || p.u > uHi || p.v < vLo || p.v > vHi) {
+        ok = false;
+        break;
+      }
+      pts.push(p);
+      zSum += p.z;
+      if (p.u < uMin) uMin = p.u;
+      if (p.u > uMax) uMax = p.u;
+      if (p.v < vMin) vMin = p.v;
+      if (p.v > vMax) vMax = p.v;
+    }
+    if (!ok || pts.length !== 8) continue;
+    if (uMax - uMin > maxSpan || vMax - vMin > maxSpan) continue;
+    // Drop cubes whose silhouette is far larger than a voxel at that depth
+    // (camera17 / strong radtan otherwise paints huge wing shards).
+    const zMean = zSum / 8;
+    const fx = cam.K[0] || 1000;
+    const expect = (2.5 * v * fx) / Math.max(zMean, nearZ);
+    if (uMax - uMin > Math.max(24, 3 * expect) || vMax - vMin > Math.max(24, 3 * expect)) {
+      continue;
+    }
+    const hull = convexHull2D(pts);
+    if (hull.length < 3) continue;
+    quads.push({
+      pts: hull,
+      z: zSum / 8,
+      lab: labs[i],
+    });
+  }
+  quads.sort((a, b) => b.z - a.z);
+  return quads;
+}
+
+/** Monotone chain convex hull on {u,v} points (returns CCW). */
+function convexHull2D(points) {
+  const pts = points.slice().sort((a, b) => (a.u === b.u ? a.v - b.v : a.u - b.u));
+  if (pts.length <= 2) return pts;
+  const cross = (o, a, b) => (a.u - o.u) * (b.v - o.v) - (a.v - o.v) * (b.u - o.u);
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+function fillStyleForOccLab(lab) {
+  const cmode = colorModeValue();
+  if (cmode === "lidar") {
+    const i = lab | 0;
+    const c =
+      classColors && i >= 0 && i < classColors.length && classColors[i]
+        ? classColors[i]
+        : [180, 180, 180];
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  }
+  return rgbCss(lab);
+}
+
 function projectVehToImage(xyz, labels, cam, maxN = 120000, lidarIds = null) {
   const K = cam.K;
   const T = cam.T_c_v;
@@ -683,7 +1150,7 @@ function projectVehToImage(xyz, labels, cam, maxN = 120000, lidarIds = null) {
 }
 
 /**
- * Occupancy: filled squares with image size ≈ voxel_m * fx / depth
+ * Occupancy: each voxel cube projected as filled faces (8 corners → 6 faces).
  * Points: single image pixels (optional min px from slider)
  * RGB photo is always drawn first; overlays stay semi-transparent.
  */
@@ -717,31 +1184,21 @@ function drawProjectionOnCanvas(canvas, img, cam, mode, ptMinPx = 1) {
 
   let n = 0;
   if (mode === "occ" || mode === "both") {
-    const occLabs = occProjLabels || occLabels;
-    if (occCenters && occLabs && occLabs.length && activeVoxel) {
-      const pts = projectVehToImage(occCenters, occLabs, cam, maxN);
-      const vox = activeVoxel;
-      const cmode = colorModeValue();
-      for (const p of pts) {
-        let side = (vox * p.fx) / Math.max(p.z, 0.3);
-        side = Math.min(Math.max(side, 1.0), 64);
-        const s = Math.max(1, side * scale);
-        ctx.globalAlpha = alpha;
-        // under lidar color mode, occ projection uses fine colors
-        if (cmode === "lidar") {
-          const i = p.lab | 0;
-          const c =
-            classColors && i >= 0 && i < classColors.length && classColors[i]
-              ? classColors[i]
-              : [180, 180, 180];
-          ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
-        } else {
-          ctx.fillStyle = rgbCss(p.lab);
+    if (occProjIjk && occProjLabels && occProjLabels.length && activeVoxel) {
+      const faces = projectOccCubes(cam, maxN);
+      ctx.globalAlpha = alpha;
+      for (const q of faces) {
+        ctx.fillStyle = fillStyleForOccLab(q.lab);
+        ctx.beginPath();
+        ctx.moveTo(ox + q.pts[0].u * scale, oy + q.pts[0].v * scale);
+        for (let k = 1; k < q.pts.length; k++) {
+          ctx.lineTo(ox + q.pts[k].u * scale, oy + q.pts[k].v * scale);
         }
-        ctx.fillRect(ox + p.u * scale - s * 0.5, oy + p.v * scale - s * 0.5, s, s);
+        ctx.closePath();
+        ctx.fill();
       }
       ctx.globalAlpha = 1;
-      n += pts.length;
+      n += faces.length;
     }
   }
 
@@ -883,7 +1340,7 @@ function renderCams(meta) {
     img.className = "base";
     img.crossOrigin = "anonymous";
     img.style.display = "none";
-    img.src = `${SCENE_ROOT}/${frameDir}/${cam.file}`;
+    img.src = camImageUrl(cam);
     const canvas = document.createElement("canvas");
     canvas.className = "thumb";
     canvas.width = 1280;
@@ -907,18 +1364,38 @@ function renderCams(meta) {
 
 async function loadFrame(frameEntry) {
   setStatus("Loading frame…");
-  frameDir = frameEntry.dir;
-  const meta = await fetchJson(`${SCENE_ROOT}/${frameDir}/meta.json`);
+  frameDir =
+    frameEntry.dir ||
+    (frameEntry.meta_uri ? frameEntry.meta_uri.replace(/\/meta\.json$/, "") : null);
+  const metaUrl = frameEntry.meta_uri
+    ? assetUrl(frameEntry.meta_uri)
+    : `${sceneRoot}/${frameDir}/meta.json`;
+  const meta = await fetchJson(metaUrl);
   currentMeta = meta;
-  classColors = meta.class_colors_rgb;
-  classNames = meta.class_names || null;
+  classColors = resolveClassColors(meta);
+  classNames =
+    (index && index.taxonomy && index.taxonomy.fine && index.taxonomy.fine.names) ||
+    meta.class_names ||
+    null;
   renderClassLegend();
-  const title = `${index.clip}  ·  ts=${meta.timestamp}  ·  voxel=${meta.voxel}m  ·  occ=${meta.n_occ}`;
+  const title = `${index.clip_id || index.clip}  ·  ts=${meta.timestamp}  ·  voxel=${(meta.grid && meta.grid.voxel) || meta.voxel}m  ·  occ=${(meta.stats && meta.stats.n_occ) || meta.n_occ}`;
   el.titleMeta.textContent = title;
   el.titleMeta.title = title;
 
-  const ijkBuf = await fetchBin(`${SCENE_ROOT}/${frameDir}/${meta.occupancy.ijk}`);
-  const labBuf = await fetchBin(`${SCENE_ROOT}/${frameDir}/${meta.occupancy.labels}`);
+  // normalize ranges for ROI/grid helpers
+  if (meta.grid) {
+    meta.voxel = meta.grid.voxel;
+    meta.x_range = meta.grid.x_range;
+    meta.y_range = meta.grid.y_range;
+    meta.z_range = meta.grid.z_range;
+    meta.occ_shape = meta.grid.shape;
+    meta.n_occ = (meta.stats && meta.stats.n_occ) || meta.n_occ;
+  }
+
+  const ijkUrl = occAsset(meta, "ijk");
+  const labUrl = occAsset(meta, "labels");
+  const ijkBuf = await fetchBin(ijkUrl);
+  const labBuf = await fetchBin(labUrl);
   const ijkArr = new Int32Array(ijkBuf);
   const labArr = new Uint8Array(labBuf);
   exportedOcc = {
@@ -926,31 +1403,99 @@ async function loadFrame(frameEntry) {
     ijk: ijkArr,
     labels: labArr,
   };
-  applyOccupancy(ijkArr, labArr, meta.voxel, "exported grid");
 
   clearPoints();
   ptXYZ = null;
   ptLabels = null;
   ptLidar = null;
   let ptsNote = "not exported";
-  if (meta.points) {
+  let frameDynXYZ = null;
+  let frameDynLab = null;
+  let frameDynLid = null;
+
+  if (meta.points || (meta.assets && meta.assets.points)) {
     try {
-      const xyzBuf = await fetchBin(`${SCENE_ROOT}/${frameDir}/${meta.points.xyz}`);
-      const plabBuf = await fetchBin(`${SCENE_ROOT}/${frameDir}/${meta.points.labels}`);
-      ptXYZ = new Float32Array(xyzBuf);
-      ptLabels = new Uint8Array(plabBuf);
-      if (meta.points.lidar_id) {
-        const lidBuf = await fetchBin(`${SCENE_ROOT}/${frameDir}/${meta.points.lidar_id}`);
-        ptLidar = new Uint8Array(lidBuf);
+      const xyzUrl = pointsAsset(meta, "xyz");
+      const labUrlP = pointsAsset(meta, "labels");
+      const lidUrl = pointsAsset(meta, "lidar_id");
+      const xyzBuf = await fetchBin(xyzUrl);
+      const plabBuf = await fetchBin(labUrlP);
+      const rawXYZ = new Float32Array(xyzBuf);
+      const rawLab = new Uint8Array(plabBuf);
+      let rawLid = null;
+      if (lidUrl) {
+        rawLid = new Uint8Array(await fetchBin(lidUrl));
       }
+      // Keep frame dynamic only — static comes from clip static_agg + ego_pose.
+      const dynIdx = [];
+      for (let i = 0; i < rawLab.length; i++) {
+        if (FINE_DYNAMIC.has(rawLab[i] | 0)) dynIdx.push(i);
+      }
+      frameDynXYZ = new Float32Array(dynIdx.length * 3);
+      frameDynLab = new Uint8Array(dynIdx.length);
+      frameDynLid = new Uint8Array(dynIdx.length);
+      for (let k = 0; k < dynIdx.length; k++) {
+        const i = dynIdx[k];
+        frameDynXYZ[k * 3] = rawXYZ[i * 3];
+        frameDynXYZ[k * 3 + 1] = rawXYZ[i * 3 + 1];
+        frameDynXYZ[k * 3 + 2] = rawXYZ[i * 3 + 2];
+        frameDynLab[k] = rawLab[i];
+        frameDynLid[k] = rawLid ? rawLid[i] : 0;
+      }
+      ptXYZ = rawXYZ;
+      ptLabels = rawLab;
+      ptLidar = rawLid;
+      ptsNote = rawLab.length.toLocaleString();
+    } catch (e) {
+      ptsNote = `export broken: ${e}`;
+    }
+  }
+
+  // Prefer clip static_agg (map→vehicle) + frame dynamic. Same static points
+  // every frame; only ego_pose changes coordinates.
+  if (staticAgg && meta.ego_pose) {
+    const xr = meta.x_range;
+    const yr = meta.y_range;
+    const zr = meta.z_range;
+    const st = staticAggInVehicle(
+      meta.ego_pose,
+      [xr[0] * 1.5, xr[1] * 1.5],
+      yr,
+      [zr[0] - 2, zr[1] + 5]
+    );
+    const merged = mergeStaticAndDynamicPoints(
+      st,
+      frameDynXYZ,
+      frameDynLab,
+      frameDynLid
+    );
+    ptXYZ = merged.xyz;
+    ptLabels = merged.labels;
+    ptLidar = merged.lidar;
+    ptsNote = `${merged.labels.length.toLocaleString()} (static_agg⊕dyn)`;
+    // Occupancy bins were already built from the same aggregate at export;
+    // keep them (fast). Points now match: same static set, pose-only change.
+    applyOccupancy(ijkArr, labArr, meta.voxel, "exported grid (static_agg⊕dyn)");
+  } else {
+    applyOccupancy(ijkArr, labArr, meta.voxel, "exported grid");
+  }
+
+  if (ptXYZ && ptLabels) {
+    try {
       buildPoints();
-      ptsNote = ptLabels.length.toLocaleString();
-      // data-driven axis help
-      let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity, zmin = Infinity, zmax = -Infinity;
+      let xmin = Infinity,
+        xmax = -Infinity,
+        ymin = Infinity,
+        ymax = -Infinity,
+        zmin = Infinity,
+        zmax = -Infinity;
       for (let i = 0; i < ptXYZ.length; i += 3) {
-        xmin = Math.min(xmin, ptXYZ[i]); xmax = Math.max(xmax, ptXYZ[i]);
-        ymin = Math.min(ymin, ptXYZ[i + 1]); ymax = Math.max(ymax, ptXYZ[i + 1]);
-        zmin = Math.min(zmin, ptXYZ[i + 2]); zmax = Math.max(zmax, ptXYZ[i + 2]);
+        xmin = Math.min(xmin, ptXYZ[i]);
+        xmax = Math.max(xmax, ptXYZ[i]);
+        ymin = Math.min(ymin, ptXYZ[i + 1]);
+        ymax = Math.max(ymax, ptXYZ[i + 1]);
+        zmin = Math.min(zmin, ptXYZ[i + 2]);
+        zmax = Math.max(zmax, ptXYZ[i + 2]);
       }
       document.getElementById("axisHelp").innerHTML = `
         Arrows follow stored numeric signs.<br/>
@@ -960,7 +1505,7 @@ async function loadFrame(frameEntry) {
         Three map: (x,z,y) so XY ground stays horizontal.
       `;
     } catch (e) {
-      ptsNote = `export broken: ${e}`;
+      ptsNote = `build points: ${e}`;
     }
   }
   syncColorModeUi();
@@ -988,25 +1533,137 @@ async function loadFrame(frameEntry) {
   setStatus(`ready · occ=${occLabels.length} · voxel=${activeVoxel}m · points=${ptsNote}`);
 }
 
-async function boot() {
-  index = await fetchJson(`${SCENE_ROOT}/index.json`);
+function updateFramePos() {
+  if (!el.framePos || !index || !index.frames) {
+    if (el.framePos) el.framePos.textContent = "—";
+    return;
+  }
+  const n = index.frames.length;
+  const i = Math.min(Math.max(0, frameIndex), Math.max(0, n - 1));
+  el.framePos.textContent = n ? `${i + 1} / ${n}` : "—";
+  if (el.btnPrevFrame) el.btnPrevFrame.disabled = i <= 0;
+  if (el.btnNextFrame) el.btnNextFrame.disabled = i >= n - 1;
+}
+
+async function loadFrameByIndex(i) {
+  if (!index || !index.frames || !index.frames.length) return;
+  const n = index.frames.length;
+  frameIndex = ((i % n) + n) % n;
+  const fr = index.frames[frameIndex];
+  if (fr.meta_uri && !fr.dir) {
+    fr.dir = fr.meta_uri.replace(/\/meta\.json$/, "");
+  }
+  if (el.frameSelect) {
+    el.frameSelect.value = fr.timestamp || fr.frame_id;
+  }
+  updateFramePos();
+  await loadFrame(fr);
+}
+
+async function loadClip(clipId) {
+  const entry = clipsCatalog.find((c) => c.id === clipId || c.clip_id === clipId);
+  sceneRoot = (entry && entry.url ? entry.url : `/scenes/${clipId}`).replace(/\/$/, "");
+  // keep URL shareable
+  const u = new URL(location.href);
+  u.searchParams.set("scene", sceneRoot);
+  history.replaceState(null, "", u);
+  setStatus(`Loading clip ${clipId}…`);
+  index = await fetchJson(`${sceneRoot}/index.json`);
+  if (!index.clip && index.clip_id) index.clip = index.clip_id;
+  await loadStaticAggFromIndex();
   el.frameSelect.innerHTML = "";
   for (const fr of index.frames) {
     const opt = document.createElement("option");
-    opt.value = fr.timestamp;
-    opt.textContent = `${fr.timestamp}  (occ=${fr.n_occ})`;
+    opt.value = fr.timestamp || fr.frame_id;
+    opt.textContent = `${fr.timestamp || fr.frame_id}  (occ=${fr.n_occ})`;
+    el.frameSelect.appendChild(opt);
+  }
+  if (!index.frames.length) {
+    setStatus("No frames in index.json");
+    updateFramePos();
+    return;
+  }
+  await loadFrameByIndex(0);
+  if (typeof refreshVideoList === "function") refreshVideoList();
+}
+
+async function boot() {
+  // discover clips
+  try {
+    const cat = await fetchJson("/api/clips");
+    clipsCatalog = cat.clips || [];
+    const preferred =
+      (sceneRoot && sceneRoot.replace(/^\/scenes\//, "").replace(/^\/scene\/?/, "")) ||
+      cat.default_clip ||
+      (clipsCatalog[0] && clipsCatalog[0].id);
+    if (el.clipSelect) {
+      el.clipSelect.innerHTML = "";
+      for (const c of clipsCatalog) {
+        const opt = document.createElement("option");
+        opt.value = c.id;
+        opt.textContent = `${c.id}  (${c.n_frames} frames)`;
+        el.clipSelect.appendChild(opt);
+      }
+      if (preferred && clipsCatalog.some((c) => c.id === preferred)) {
+        el.clipSelect.value = preferred;
+      } else if (clipsCatalog.length) {
+        el.clipSelect.value = clipsCatalog[0].id;
+      }
+    }
+    if (clipsCatalog.length) {
+      await loadClip(el.clipSelect ? el.clipSelect.value : preferred);
+      return;
+    }
+  } catch (e) {
+    console.warn(" /api/clips unavailable, fallback single scene", e);
+  }
+  // fallback: legacy ?scene=/scene
+  if (!sceneRoot) sceneRoot = "/scene";
+  index = await fetchJson(`${sceneRoot}/index.json`);
+  if (!index.clip && index.clip_id) index.clip = index.clip_id;
+  await loadStaticAggFromIndex();
+  el.frameSelect.innerHTML = "";
+  for (const fr of index.frames) {
+    const opt = document.createElement("option");
+    opt.value = fr.timestamp || fr.frame_id;
+    opt.textContent = `${fr.timestamp || fr.frame_id}  (occ=${fr.n_occ})`;
     el.frameSelect.appendChild(opt);
   }
   if (!index.frames.length) {
     setStatus("No frames in index.json");
     return;
   }
-  await loadFrame(index.frames[0]);
+  await loadFrameByIndex(0);
 }
 
 el.frameSelect.addEventListener("change", async () => {
-  const fr = index.frames.find((f) => f.timestamp === el.frameSelect.value);
-  if (fr) await loadFrame(fr);
+  const i = index.frames.findIndex(
+    (f) => (f.timestamp || f.frame_id) === el.frameSelect.value
+  );
+  if (i >= 0) await loadFrameByIndex(i);
+});
+if (el.clipSelect) {
+  el.clipSelect.addEventListener("change", async () => {
+    await loadClip(el.clipSelect.value);
+  });
+}
+if (el.btnPrevFrame) {
+  el.btnPrevFrame.addEventListener("click", () => loadFrameByIndex(frameIndex - 1));
+}
+if (el.btnNextFrame) {
+  el.btnNextFrame.addEventListener("click", () => loadFrameByIndex(frameIndex + 1));
+}
+window.addEventListener("keydown", (e) => {
+  if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA")) {
+    return;
+  }
+  if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    loadFrameByIndex(frameIndex - 1);
+  } else if (e.key === "ArrowRight") {
+    e.preventDefault();
+    loadFrameByIndex(frameIndex + 1);
+  }
 });
 el.togOcc.addEventListener("change", () => {
   if (occMesh) occMesh.visible = el.togOcc.checked;
@@ -1174,10 +1831,17 @@ function setVidStatus(msg) {
   if (el.vidStatus) el.vidStatus.textContent = msg || "";
 }
 
+function currentClipId() {
+  if (el.clipSelect && el.clipSelect.value) return el.clipSelect.value;
+  const m = String(sceneRoot || "").match(/\/scenes\/([^/]+)/);
+  return m ? m[1] : "";
+}
+
 async function refreshVideoList() {
   if (!el.vidList) return;
   try {
-    const r = await fetch("/api/video/list");
+    const cid = currentClipId();
+    const r = await fetch(`/api/video/list?clip_id=${encodeURIComponent(cid)}`);
     const data = await r.json();
     const vids = data.videos || [];
     if (!vids.length) {
@@ -1197,9 +1861,10 @@ async function refreshVideoList() {
 
 async function pollVideoJob() {
   try {
-    const r = await fetch("/api/video/status");
+    const cid = currentClipId();
+    const r = await fetch(`/api/video/status?clip_id=${encodeURIComponent(cid)}`);
     const s = await r.json();
-    const pct = s.n ? Math.round(100 * (s.frame || 0) / s.n) : Math.round(100 * (s.progress || 0));
+    const pct = s.n ? Math.round((100 * (s.frame || 0)) / s.n) : Math.round(100 * (s.progress || 0));
     if (s.state === "running") {
       setVidStatus(`exporting… ${s.message || ""} (${pct}%)`);
       return true;
@@ -1237,6 +1902,7 @@ if (el.btnExportVid) {
     setVidStatus("starting…");
     try {
       const body = {
+        clip_id: currentClipId(),
         mode: el.vidMode.value,
         fps: Number(el.vidFps.value) || 5,
         max_frames: Number(el.vidMaxFrames.value) || 0,

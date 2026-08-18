@@ -159,9 +159,15 @@
         <span class="meta" id="titleMeta" title="">—</span>
       </div>
       <div class="controls">
+        <label class="ctrl">Clip
+          <select id="clipSelect"></select>
+        </label>
         <label class="ctrl">Frame
           <select id="frameSelect"></select>
         </label>
+        <button type="button" id="btnPrevFrame" title="Previous frame (←)">◀ Prev</button>
+        <button type="button" id="btnNextFrame" title="Next frame (→)">Next ▶</button>
+        <span class="hint" id="framePos">—</span>
         <label class="ctrl"><input type="checkbox" id="togOcc" checked /> Occupancy</label>
         <label class="ctrl"><input type="checkbox" id="togPts" checked /> Points</label>
         <label class="ctrl"><input type="checkbox" id="togGrid" checked /> Ground grid</label>
@@ -229,11 +235,11 @@
         <div class="row">
           <h2>Axes = vehicle coords</h2>
           <div class="hint" id="axisHelp">
-            Arrows follow the sign of stored point values.<br/>
-            <span style="color:var(--x)">+X</span> = increasing x<br/>
-            <span style="color:var(--y)">+Y</span> = increasing y<br/>
-            <span style="color:var(--z)">+Z</span> = increasing z<br/>
-            No left/right assumption.
+            Vehicle: +x right, +y forward, +z up.<br/>
+            Looking forward, +X is screen-right (matches cams).<br/>
+            <span style="color:var(--x)">+X</span> lateral &nbsp;
+            <span style="color:var(--y)">+Y</span> forward &nbsp;
+            <span style="color:var(--z)">+Z</span> up
           </div>
         </div>
         <div class="row">
@@ -287,10 +293,10 @@
       <div id="view">
         <div id="canvas-wrap"></div>
         <div id="axis-legend">
-          <div class="x">→ +X = +x in bin</div>
-          <div class="y">→ +Y = +y in bin</div>
-          <div class="z">→ +Z = +z in bin</div>
-          <div style="color:#9aa3ad;margin-top:4px">Three (x,z,y); ground ≈ XY</div>
+          <div class="x">→ +X = vehicle right (bin +x)</div>
+          <div class="y">→ +Y = vehicle forward (bin +y)</div>
+          <div class="z">→ +Z = vehicle up (bin +z)</div>
+          <div style="color:#9aa3ad;margin-top:4px">Display (−x,z,y); L/R matches cams</div>
         </div>
       </div>
       <section id="cams-panel">
@@ -313,7 +319,7 @@
             </label>
             <button type="button" id="btnRefreshProj">Refresh projection</button>
           </div>
-          <div class="hint">RGB underlay · occ squares translucent · click image to enlarge</div>
+          <div class="hint">RGB underlay · occ = voxel cubes (8 corners) · click to enlarge</div>
         </div>
         <div id="cams"></div>
       </section>
@@ -340,6 +346,6 @@
     }
   }
   </script>
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js?v=occ-fix-14"></script>
 </body>
 </html>
