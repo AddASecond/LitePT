@@ -29,12 +29,27 @@
       min-height: 0;
     }
     header {
-      display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+      display: flex; flex-direction: column; gap: 8px;
       padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+      flex: 0 0 auto; z-index: 5;
     }
-    header h1 { font-size: 15px; margin: 0; font-weight: 600; }
-    header .meta { color: var(--muted); }
-    .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-left: auto; }
+    .header-top {
+      display: flex; align-items: baseline; gap: 12px; min-width: 0;
+    }
+    header h1 { font-size: 15px; margin: 0; font-weight: 600; flex: 0 0 auto; }
+    header .meta {
+      color: var(--muted); min-width: 0; flex: 1 1 auto;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;
+      width: 100%; margin-left: 0;
+    }
+    #status {
+      color: var(--muted); font-size: 12px;
+      flex: 1 1 160px; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
     label.ctrl { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); white-space: nowrap; }
     select, button {
       background: #222833; color: var(--text); border: 1px solid var(--border);
@@ -44,34 +59,40 @@
     button:hover { border-color: var(--accent); }
     #main {
       display: grid;
-      grid-template-columns: 250px minmax(0, 1.05fr) minmax(520px, 1.15fr);
-      min-height: 0;
+      grid-template-columns: 250px minmax(0, 1fr) minmax(420px, 0.95fr);
+      min-height: 0; overflow: hidden;
     }
     #sidebar {
       background: var(--panel); border-right: 1px solid var(--border);
-      padding: 12px; overflow: auto;
+      padding: 12px; overflow: auto; min-height: 0;
     }
     #sidebar h2 {
       font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
       color: var(--muted); margin: 0 0 8px;
     }
-    #view { position: relative; min-height: 0; border-right: 1px solid var(--border); }
+    #view { position: relative; min-height: 0; min-width: 0; border-right: 1px solid var(--border); overflow: hidden; }
     #canvas-wrap { position: absolute; inset: 0; }
     #axis-legend {
       position: absolute; left: 12px; bottom: 12px; z-index: 2;
       background: rgba(15,18,24,0.88); border: 1px solid var(--border);
       border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.55;
+      pointer-events: none;
     }
     #axis-legend .x { color: var(--x); }
     #axis-legend .y { color: var(--y); }
     #axis-legend .z { color: var(--z); }
     #cams-panel {
-      display: flex; flex-direction: column; min-height: 0; background: var(--panel);
+      display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel);
     }
     #cams-toolbar {
-      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      display: flex; flex-direction: column; gap: 6px;
       padding: 8px 10px; border-bottom: 1px solid var(--border);
+      flex: 0 0 auto;
     }
+    #cams-toolbar .toolbar-row {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    }
+    #cams-toolbar .hint { line-height: 1.35; }
     #cams {
       flex: 1; min-height: 0; overflow: auto;
       display: flex; flex-direction: column; gap: 10px;
@@ -104,7 +125,7 @@
     }
     .legend-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .hint { color: var(--muted); font-size: 12px; }
-    #status { color: var(--muted); font-size: 12px; }
+    .row { margin-bottom: 14px; }
     /* lightbox */
     #lightbox {
       display: none; position: fixed; inset: 0; z-index: 50;
@@ -121,7 +142,10 @@
     #lb-stage.dragging { cursor: grabbing; }
     #lb-canvas { position: absolute; left: 50%; top: 50%; transform-origin: center center; }
     @media (max-width: 1200px) {
-      #main { grid-template-columns: 220px 1fr; grid-template-rows: 1fr 46vh; }
+      #main {
+        grid-template-columns: 220px minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr) minmax(280px, 42vh);
+      }
       #cams-panel { grid-column: 1 / -1; border-top: 1px solid var(--border); }
       .cam-card .stage { height: 240px; }
     }
@@ -130,8 +154,10 @@
 <body>
   <div id="app">
     <header>
-      <h1>Robotruck Occ Viewer</h1>
-      <span class="meta" id="titleMeta">—</span>
+      <div class="header-top">
+        <h1>Robotruck Occ Viewer</h1>
+        <span class="meta" id="titleMeta" title="">—</span>
+      </div>
       <div class="controls">
         <label class="ctrl">Frame
           <select id="frameSelect"></select>
@@ -223,23 +249,25 @@
       </div>
       <section id="cams-panel">
         <div id="cams-toolbar">
-          <strong style="font-size:12px">Cameras</strong>
-          <label class="ctrl">Project
-            <select id="projMode">
-              <option value="none">RGB only</option>
-              <option value="occ" selected>Occupancy</option>
-              <option value="points">Points</option>
-              <option value="both">Occ + Points</option>
-            </select>
-          </label>
-          <label class="ctrl" title="Overlay opacity on photo">Alpha
-            <input type="range" id="projAlpha" min="0.1" max="0.85" step="0.05" value="0.4" />
-          </label>
-          <label class="ctrl" title="Min point size in image pixels">Pt px
-            <input type="range" id="projRadius" min="1" max="3" step="1" value="1" />
-          </label>
-          <button type="button" id="btnRefreshProj">Refresh projection</button>
-          <span class="hint">RGB always underlay · occ squares semi-transparent · click to enlarge</span>
+          <div class="toolbar-row">
+            <strong style="font-size:12px">Cameras</strong>
+            <label class="ctrl">Project
+              <select id="projMode">
+                <option value="none">RGB only</option>
+                <option value="occ" selected>Occupancy</option>
+                <option value="points">Points</option>
+                <option value="both">Occ + Points</option>
+              </select>
+            </label>
+            <label class="ctrl" title="Overlay opacity on photo">Alpha
+              <input type="range" id="projAlpha" min="0.1" max="0.85" step="0.05" value="0.4" />
+            </label>
+            <label class="ctrl" title="Min point size in image pixels">Pt px
+              <input type="range" id="projRadius" min="1" max="3" step="1" value="1" />
+            </label>
+            <button type="button" id="btnRefreshProj">Refresh projection</button>
+          </div>
+          <div class="hint">RGB underlay · occ squares translucent · click image to enlarge</div>
         </div>
         <div id="cams"></div>
       </section>

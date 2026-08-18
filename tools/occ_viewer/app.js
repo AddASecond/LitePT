@@ -351,7 +351,9 @@ function applyOccupancy(ijk, labels, voxel, sourceNote) {
     el.occRebuildHint.textContent = `${sourceNote} · voxel=${voxel}m · n=${labels.length.toLocaleString()}`;
   }
   if (currentMeta) {
-    el.titleMeta.textContent = `${index.clip}  ·  ts=${currentMeta.timestamp}  ·  voxel=${voxel}m  ·  occ=${labels.length}`;
+    const t = `${index.clip}  ·  ts=${currentMeta.timestamp}  ·  voxel=${voxel}m  ·  occ=${labels.length}`;
+    el.titleMeta.textContent = t;
+    el.titleMeta.title = t;
   }
 }
 
@@ -646,7 +648,9 @@ async function loadFrame(frameEntry) {
   classColors = meta.class_colors_rgb;
   classNames = meta.class_names || null;
   renderClassLegend();
-  el.titleMeta.textContent = `${index.clip}  ·  ts=${meta.timestamp}  ·  voxel=${meta.voxel}m  ·  occ=${meta.n_occ}`;
+  const title = `${index.clip}  ·  ts=${meta.timestamp}  ·  voxel=${meta.voxel}m  ·  occ=${meta.n_occ}`;
+  el.titleMeta.textContent = title;
+  el.titleMeta.title = title;
 
   const ijkBuf = await fetchBin(`${SCENE_ROOT}/${frameDir}/${meta.occupancy.ijk}`);
   const labBuf = await fetchBin(`${SCENE_ROOT}/${frameDir}/${meta.occupancy.labels}`);
