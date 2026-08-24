@@ -1,5 +1,8 @@
 # Robotruck Occ Viewer — Scene Package Schema (`robotruck_occ_scene/v1`)
 
+> 操作说明（启动、UI、投影、导出、排错）见同目录 **[USER_MANUAL.md](./USER_MANUAL.md)**。  
+> **GSS / Mongo 落库（专用 occdata + 与 raw_data 表/目录对齐）**见 **[GSS_OCC_STORAGE.md](./GSS_OCC_STORAGE.md)**。
+
 本格式是前端 `tools/occ_viewer` 的唯一输入约定。路径全部相对 **scene 根目录**（或将来 Mongo/GridFS/S3 上的逻辑前缀），**不绑定本机绝对路径**；落库时只需把 `uri` 改写成对象存储 key / GridFS id，前端用同一字段解析。
 
 ---
@@ -25,13 +28,16 @@
         ...
 ```
 
-Mongo 建议：
+Mongo / GSS 落库（**推荐，与 raw 对齐**）见 [GSS_OCC_STORAGE.md](./GSS_OCC_STORAGE.md)：
 
-| 集合 | 文档 | blob |
-|------|------|------|
-| `occ_scenes` | = `index.json` 内容 | — |
-| `occ_frames` | = 每帧 `meta.json` 内容，带 `scene_id` | — |
-| GridFS / S3 | `assets.*.uri` 指向的二进制与图片 | 按 uri 取 |
+| 层 | 约定 |
+|----|------|
+| DB | `perception_experiment` |
+| 表 | `occ_data_clips_<suffix>` / `occ_data_frames_<suffix>` ↔ `raw_data_*_<suffix>` |
+| 盘 | **原始**在 RTGPU 卷 `h200-data-krk030-rawdata` → `/data/rawdata/{lidar,camera}/`；**Occ** 建议写有空闲的扩展卷，如 `/data/rawdata-3/occ/...`（需 `rtgpu volume attach`，见 [GSS_OCC_STORAGE.md](./GSS_OCC_STORAGE.md) §3） |
+| 盘 | Clip 级：`/data/rawdata-3/occ/clips/{a}/{b}/{c}/static_agg/` |
+
+本地预览仍可用下文「包目录」；ingest 时按 frame/clip **md5** 映射到 `occdata` 分片路径。
 
 ---
 
