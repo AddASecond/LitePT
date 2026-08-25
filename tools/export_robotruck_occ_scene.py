@@ -211,12 +211,18 @@ def export_frame(
             continue
         cam_doc = sensors[cam_name]
         K, dist5, T_c_v, T_v_c, cal_w, cal_h = parse_camera(cam_doc)
+        # Camera corruption must not invalidate a LiDAR OCC frame.  Verify the
+        # source before copying and omit only the unreadable camera asset.
+        try:
+            with Image.open(img_path) as im:
+                iw, ih = im.size
+                im.verify()
+        except (OSError, ValueError) as error:
+            print(f"  [camera-skip] ts={ts} camera={cam_name}: {error}", flush=True)
+            continue
         # clean image copy (no overlays)
         dst = cam_dir / f"{cam_name}.jpg"
         shutil.copy2(img_path, dst)
-        # if image size differs from calibration, note scales
-        with Image.open(img_path) as im:
-            iw, ih = im.size
         sx = iw / float(cal_w) if cal_w else 1.0
         sy = ih / float(cal_h) if cal_h else 1.0
         K_img = K.copy()

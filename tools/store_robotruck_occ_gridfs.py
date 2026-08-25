@@ -122,7 +122,7 @@ def main() -> int:
     prepared, clip_ids = [], set()
     for entry in index.get("frames") or []:
         md5 = INGEST.md5_from_backup(entry, backup)
-        raw = INGEST.find_raw_frame(raw_frames, md5) if md5 else None
+        raw = INGEST.find_raw_frame(raw_frames, md5, entry.get("timestamp")) if md5 else None
         if raw is None:
             raise RuntimeError(f"raw trace failed for scene frame {entry.get('timestamp')}, md5={md5}")
         lidar_md5 = INGEST.raw_lidar_md5(raw) or raw.get("md5")

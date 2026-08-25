@@ -158,7 +158,7 @@ def main() -> int:
         subprocess.run(command, cwd=ROOT, check=True)
     else:
         print(f"reuse existing inference scene: {scene}", flush=True)
-    store_command = [str(ROOT / ".venv_smoke/bin/python"), str(ROOT / "tools/store_robotruck_occ_gridfs.py"), "--scene", str(scene), "--raw-frame-collection", args.raw_frame_collection, "--raw-clip-collection", raw_clip_collection]
+    store_command = [str(ROOT / ".venv_smoke/bin/python"), str(ROOT / "tools/store_robotruck_occ_gridfs.py"), "--scene", str(scene), "--raw-frame-collection", args.raw_frame_collection, "--raw-clip-collection", raw_clip_collection, "--backup-root", args.cache_root]
     if args.write:
         store_command.append("--write")
     subprocess.run(store_command, cwd=ROOT, check=True)
