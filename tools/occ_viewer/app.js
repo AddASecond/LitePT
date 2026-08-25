@@ -6,6 +6,7 @@ const qs = new URLSearchParams(location.search);
 let sceneRoot = (qs.get("scene") || "").replace(/\/$/, "");
 let clipsCatalog = [];
 let frameIndex = 0;
+let currentOccVariant = "litept";
 
 /** Resolve asset URI relative to scene root (Mongo/S3 can swap to absolute later). */
 function assetUrl(uri, frameRelFallback = null) {
@@ -20,7 +21,9 @@ function assetUrl(uri, frameRelFallback = null) {
 }
 
 function occAsset(meta, key) {
-  const a = meta.assets && meta.assets.occupancy && meta.assets.occupancy[key];
+  const variants = meta.assets && meta.assets.occupancy_variants;
+  const group = (variants && variants[currentOccVariant]) || (meta.assets && meta.assets.occupancy);
+  const a = group && group[key];
   if (a && a.uri) return assetUrl(a.uri);
   if (meta.occupancy && meta.occupancy[key]) return assetUrl(meta.occupancy[key], frameDir);
   return null;
@@ -42,6 +45,7 @@ function camImageUrl(cam) {
 const el = {
   frameSelect: document.getElementById("frameSelect"),
   clipSelect: document.getElementById("clipSelect"),
+  occVariant: document.getElementById("occVariant"),
   btnPrevFrame: document.getElementById("btnPrevFrame"),
   btnNextFrame: document.getElementById("btnNextFrame"),
   framePos: document.getElementById("framePos"),
@@ -1554,7 +1558,7 @@ async function loadFrameByIndex(i) {
     fr.dir = fr.meta_uri.replace(/\/meta\.json$/, "");
   }
   if (el.frameSelect) {
-    el.frameSelect.value = fr.timestamp || fr.frame_id;
+    el.frameSelect.value = String(fr.timestamp || fr.frame_id);
   }
   updateFramePos();
   await loadFrame(fr);
@@ -1571,10 +1575,23 @@ async function loadClip(clipId) {
   index = await fetchJson(`${sceneRoot}/index.json`);
   if (!index.clip && index.clip_id) index.clip = index.clip_id;
   await loadStaticAggFromIndex();
+  if (el.occVariant) {
+    const config = index.occupancy_variants;
+    el.occVariant.innerHTML = "";
+    const variants = (config && config.variants) || [{ id: "litept", name: "LitePT dynamic" }];
+    for (const variant of variants) {
+      const opt = document.createElement("option");
+      opt.value = variant.id;
+      opt.textContent = variant.name || variant.id;
+      el.occVariant.appendChild(opt);
+    }
+    currentOccVariant = (config && config.default) || variants[0].id;
+    el.occVariant.value = currentOccVariant;
+  }
   el.frameSelect.innerHTML = "";
   for (const fr of index.frames) {
     const opt = document.createElement("option");
-    opt.value = fr.timestamp || fr.frame_id;
+    opt.value = String(fr.timestamp || fr.frame_id);
     opt.textContent = `${fr.timestamp || fr.frame_id}  (occ=${fr.n_occ})`;
     el.frameSelect.appendChild(opt);
   }
@@ -1625,7 +1642,7 @@ async function boot() {
   el.frameSelect.innerHTML = "";
   for (const fr of index.frames) {
     const opt = document.createElement("option");
-    opt.value = fr.timestamp || fr.frame_id;
+    opt.value = String(fr.timestamp || fr.frame_id);
     opt.textContent = `${fr.timestamp || fr.frame_id}  (occ=${fr.n_occ})`;
     el.frameSelect.appendChild(opt);
   }
@@ -1638,10 +1655,16 @@ async function boot() {
 
 el.frameSelect.addEventListener("change", async () => {
   const i = index.frames.findIndex(
-    (f) => (f.timestamp || f.frame_id) === el.frameSelect.value
+    (f) => String(f.timestamp || f.frame_id) === String(el.frameSelect.value)
   );
   if (i >= 0) await loadFrameByIndex(i);
 });
+if (el.occVariant) {
+  el.occVariant.addEventListener("change", async () => {
+    currentOccVariant = el.occVariant.value;
+    await loadFrameByIndex(frameIndex);
+  });
+}
 if (el.clipSelect) {
   el.clipSelect.addEventListener("change", async () => {
     await loadClip(el.clipSelect.value);
