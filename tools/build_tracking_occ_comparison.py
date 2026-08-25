@@ -227,17 +227,23 @@ def main() -> int:
         entry["n_occ_variants"] = {"litept": baseline["n"], "tracking": tracking_refs["n"]}
 
         if args.write_mongo:
-            mongo_assets = {}
-            source = {"clip_id": clip_id, "timestamp": int(ts), "algorithm": "tracking_boxes_v1"}
-            for key, ref in tracking_refs.items():
-                if not isinstance(ref, dict):
-                    continue
-                mongo_assets[key] = STORE.store(
-                    bucket, files, scene / ref["uri"],
-                    f"occ-compare/lidar14_0813/{clip_id}/{ts}/tracking/{Path(ref['uri']).name}",
-                    {**source, "asset": key, "dtype": ref["dtype"], "shape": ref["shape"]},
-                )
-                mongo_assets[key].update({"dtype": ref["dtype"], "shape": ref["shape"]})
+            mongo_variant_assets = {}
+            for variant, refs, algorithm in (
+                ("litept", baseline, "litept_semantic_ego_filtered_v1"),
+                ("tracking", tracking_refs, "tracking_boxes_ego_filtered_v1"),
+            ):
+                assets = {}
+                source = {"clip_id": clip_id, "timestamp": int(ts), "algorithm": algorithm}
+                for key, ref in refs.items():
+                    if not isinstance(ref, dict):
+                        continue
+                    assets[key] = STORE.store(
+                        bucket, files, scene / ref["uri"],
+                        f"occ-compare/lidar14_0813/{clip_id}/{ts}/{variant}/{Path(ref['uri']).name}",
+                        {**source, "asset": key, "dtype": ref["dtype"], "shape": ref["shape"]},
+                    )
+                    assets[key].update({"dtype": ref["dtype"], "shape": ref["shape"]})
+                mongo_variant_assets[variant] = assets
             baseline_doc = db.occ_data_frames_lidar14_0813.find_one(
                 {"source.clip_id": clip_id, "timestamp": int(ts)}, {"_id": 1, "assets.occupancy": 1}
             )
@@ -249,8 +255,8 @@ def main() -> int:
                     "timestamp": int(ts),
                     "source": {"raw_frame_collection": "raw_data_frames_lidar14_0813", "raw_md5": raw_meta.get("md5")},
                     "variants": {
-                        "litept": {"frame_document_id": str(baseline_doc["_id"]) if baseline_doc else None, "assets": ((baseline_doc or {}).get("assets") or {}).get("occupancy")},
-                        "tracking": {"algorithm": "oriented_lidar_object_boxes/v1", "assets": mongo_assets},
+                        "litept": {"algorithm": "litept_semantic_ego_filtered/v1", "frame_document_id": str(baseline_doc["_id"]) if baseline_doc else None, "assets": mongo_variant_assets["litept"]},
+                        "tracking": {"algorithm": "oriented_lidar_object_boxes_ego_filtered/v1", "assets": mongo_variant_assets["tracking"]},
                     },
                     "od_boxes": meta["od_boxes"],
                     "stats": {"litept_n_occ": baseline["n"], "tracking_n_occ": tracking_refs["n"], "tracking_objects": len(tracking_objects), "tracking_dynamic_points": int(dynamic_mask.sum())},
