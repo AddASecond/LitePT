@@ -63,9 +63,8 @@ def ground_aware_ego_keep_mask(xyz: np.ndarray, labels: np.ndarray, config: dict
     height = xyz[:, 2] - ground_z
     inside_xy = ((xyz[:, 0] >= x0) & (xyz[:, 0] <= x1)
                  & (xyz[:, 1] >= y0) & (xyz[:, 1] <= y1))
-    ground_semantic = np.isin(np.asarray(labels).reshape(-1), list(WAYMO_GROUND_IDS))
-    remove = (inside_xy & ~ground_semantic
-              & (height > float(config.get("min_height", 0.2)))
+    remove = (inside_xy
+              & (height > float(config.get("min_height", 0.35)))
               & (height < float(config.get("max_height", 4.0))))
     return ~remove, {"enabled": True, "removed": int(remove.sum()),
                      "ground_fit_points": int(fit.sum()),

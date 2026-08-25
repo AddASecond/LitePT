@@ -203,7 +203,9 @@ def main() -> int:
         )
         tracking_refs = write_variant(frame_dir, grid)
         baseline = meta["assets"]["occupancy"]
+        existing_variants = meta["assets"].get("occupancy_variants") or {}
         meta["assets"]["occupancy_variants"] = {
+            **existing_variants,
             "litept": baseline,
             "tracking": tracking_refs,
         }
@@ -268,13 +270,17 @@ def main() -> int:
         if number % 10 == 0 or number == len(index["frames"]):
             print(f"built {number}/{len(index['frames'])}", flush=True)
 
-    index["occupancy_variants"] = {
-        "default": "litept",
-        "variants": [
-            {"id": "litept", "name": "LitePT dynamic"},
-            {"id": "tracking", "name": "OD/tracking boxes"},
-        ],
-    }
+    first_ts = str(index["frames"][0].get("timestamp") or index["frames"][0]["frame_id"])
+    first_meta = json.loads((scene / "frames" / first_ts / "meta.json").read_text())
+    has_before = "before_ego_filter" in ((first_meta.get("assets") or {}).get("occupancy_variants") or {})
+    variant_defs = []
+    if has_before:
+        variant_defs.append({"id": "before_ego_filter", "name": "Before ego filter (OCC)"})
+    variant_defs.extend([
+        {"id": "litept", "name": "After ego filter (OCC)"},
+        {"id": "tracking", "name": "OD/tracking boxes (OCC)"},
+    ])
+    index["occupancy_variants"] = {"default": "litept", "variants": variant_defs}
     index["comparison_summary"] = {
         "frames": len(comparison_stats),
         "mean_litept_n_occ": float(np.mean([x["litept"] for x in comparison_stats])),

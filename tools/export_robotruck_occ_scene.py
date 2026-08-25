@@ -440,7 +440,7 @@ def main() -> int:
     ap.add_argument("--ego-filter", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--ego-x-range", type=float, nargs=2, default=(-1.65, 1.65))
     ap.add_argument("--ego-y-range", type=float, nargs=2, default=(-1.0, 2.5))
-    ap.add_argument("--ego-min-height", type=float, default=0.20)
+    ap.add_argument("--ego-min-height", type=float, default=0.35)
     ap.add_argument("--ego-max-height", type=float, default=4.0)
     args = ap.parse_args()
 
