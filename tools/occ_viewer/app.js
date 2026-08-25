@@ -55,6 +55,7 @@ const el = {
   cams: document.getElementById("cams"),
   togOcc: document.getElementById("togOcc"),
   togPts: document.getElementById("togPts"),
+  togOdBoxes: document.getElementById("togOdBoxes"),
   togGrid: document.getElementById("togGrid"),
   togAxes: document.getElementById("togAxes"),
   occOpacity: document.getElementById("occOpacity"),
@@ -114,6 +115,7 @@ let currentMeta = null;
 let frameDir = null;
 let occMesh = null;
 let pointsObj = null;
+let odBoxesGroup = null;
 let gridHelper = null;
 let axesGroup = null;
 let classColors = null;
@@ -212,6 +214,61 @@ function makeSprite(text, pos, color) {
   spr.position.copy(pos);
   spr.scale.set(10, 2, 1);
   return spr;
+}
+
+function clearOdBoxes() {
+  if (!odBoxesGroup) return;
+  scene.remove(odBoxesGroup);
+  odBoxesGroup.traverse((obj) => {
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) {
+      if (obj.material.map) obj.material.map.dispose();
+      obj.material.dispose();
+    }
+  });
+  odBoxesGroup = null;
+}
+
+function buildOdBoxes(meta) {
+  clearOdBoxes();
+  odBoxesGroup = new THREE.Group();
+  const objects = (meta.od_boxes && meta.od_boxes.objects) || [];
+  for (const obj of objects) {
+    const c = obj.center_imu || [];
+    const s = obj.size || [];
+    if (c.length < 3 || s.length < 3) continue;
+    const [length, width, height] = s.map(Number);
+    const yaw = Number(obj.orientation_imu || 0);
+    const ux = [Math.cos(yaw) * length / 2, Math.sin(yaw) * length / 2];
+    const uy = [-Math.sin(yaw) * width / 2, Math.cos(yaw) * width / 2];
+    const corners = [];
+    for (const zSign of [-1, 1]) {
+      for (const xSign of [-1, 1]) {
+        for (const ySign of [-1, 1]) {
+          corners.push(vehToThree(
+            Number(c[0]) + xSign * ux[0] + ySign * uy[0],
+            Number(c[1]) + xSign * ux[1] + ySign * uy[1],
+            Number(c[2]) + zSign * height / 2
+          ));
+        }
+      }
+    }
+    const edges = [[0,1],[0,2],[1,3],[2,3],[4,5],[4,6],[5,7],[6,7],[0,4],[1,5],[2,6],[3,7]];
+    const positions = [];
+    for (const [a, b] of edges) positions.push(...corners[a].toArray(), ...corners[b].toArray());
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    const matched = obj.display_id !== null && obj.display_id !== undefined;
+    const color = matched ? 0xffcc33 : 0xff5c7a;
+    odBoxesGroup.add(new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color })));
+    const id = matched ? obj.display_id : "unmatched";
+    const label = makeSprite(`OD#${obj.od_index} → ${id}`, vehToThree(Number(c[0]), Number(c[1]), Number(c[2]) + height / 2 + 0.8), matched ? "#ffdd55" : "#ff6b86");
+    label.scale.set(12, 2.4, 1);
+    odBoxesGroup.add(label);
+  }
+  odBoxesGroup.visible = el.togOdBoxes.checked;
+  scene.add(odBoxesGroup);
+  return objects.length;
 }
 
 function buildAxes() {
@@ -1516,6 +1573,7 @@ async function loadFrame(frameEntry) {
   updateRoiHelper();
   // re-apply color/ROI filters now that points+occ are both loaded
   rebuildColoredViews();
+  const odBoxCount = buildOdBoxes(meta);
 
   el.sceneInfo.innerHTML = `
     <div>occ voxels: <b>${occLabels ? occLabels.length.toLocaleString() : meta.n_occ.toLocaleString()}</b></div>
@@ -1525,6 +1583,7 @@ async function loadFrame(frameEntry) {
     <div>y: [${meta.y_range.join(", ")}]</div>
     <div>z: [${meta.z_range.join(", ")}]</div>
     <div>points: <b>${ptsNote}</b></div>
+    <div>OD boxes: <b>${odBoxCount}</b> (yellow=oracle ID matched, red=unmatched)</div>
   `;
 
   renderCams(meta);
@@ -1708,6 +1767,9 @@ el.togPts.addEventListener("change", () => {
   } else if (el.togPts.checked) {
     setStatus("No points in this scene — re-export with --export-points");
   }
+});
+el.togOdBoxes.addEventListener("change", () => {
+  if (odBoxesGroup) odBoxesGroup.visible = el.togOdBoxes.checked;
 });
 el.togGrid.addEventListener("change", () => {
   gridHelper.visible = el.togGrid.checked;

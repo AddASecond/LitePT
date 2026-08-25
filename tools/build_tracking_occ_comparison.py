@@ -68,6 +68,52 @@ def points_in_tracking_boxes(
     return inside_any, track
 
 
+def annotate_tracking_objects(objects: list[dict], oracle: list[dict]) -> list[dict]:
+    """Serialize OD boxes and associate their nearest oracle object ID."""
+    candidates = []
+    for oi, obj in enumerate(objects):
+        center = obj.get("center_imu") or []
+        if len(center) < 3:
+            continue
+        for gi, gt in enumerate(oracle):
+            gt_center = gt.get("center_imu") or []
+            if len(gt_center) < 3:
+                continue
+            distance = float(np.linalg.norm(
+                np.asarray(center[:3], dtype=np.float32)
+                - np.asarray(gt_center[:3], dtype=np.float32)
+            ))
+            candidates.append((distance, oi, gi))
+    matched: dict[int, tuple[int, float]] = {}
+    used_oracle = set()
+    for distance, oi, gi in sorted(candidates):
+        if distance > 5.0 or oi in matched or gi in used_oracle:
+            continue
+        matched[oi] = (gi, distance)
+        used_oracle.add(gi)
+
+    result = []
+    for oi, obj in enumerate(objects):
+        center, size = obj.get("center_imu") or [], obj.get("size") or []
+        if len(center) < 3 or len(size) < 3:
+            continue
+        match = matched.get(oi)
+        gt = oracle[match[0]] if match else None
+        result.append({
+            "od_index": oi,
+            "display_id": str(gt.get("object_id")) if gt and gt.get("object_id") is not None else None,
+            "id_source": "dependency.oracle.object_id" if gt else None,
+            "match_distance_m": match[1] if match else None,
+            "type": obj.get("type"),
+            "confidence": obj.get("confidence"),
+            "center_imu": [float(v) for v in center[:3]],
+            "size": [float(v) for v in size[:3]],
+            "orientation_imu": float(obj.get("orientation_imu") or 0.0),
+            "velocity_imu": [float(v) for v in (obj.get("velocity_imu") or [])],
+        })
+    return result
+
+
 def write_variant(frame_dir: Path, grid) -> dict:
     prefix = f"frames/{frame_dir.name}"
     files = {
@@ -132,6 +178,8 @@ def main() -> int:
         pred_path = ROOT / "exp/robotruck/clip_video" / scene.name / "preds" / f"{ts}_pred.npy"
         labels = np.load(pred_path).astype(np.uint8)
         tracking_objects = (((raw_meta.get("dependency") or {}).get("lidar_objects") or {}).get("objects") or [])
+        oracle_objects = (((raw_meta.get("dependency") or {}).get("oracle") or {}).get("objects") or [])
+        annotated_objects = annotate_tracking_objects(tracking_objects, oracle_objects)
         dynamic_mask, track_ordinal = points_in_tracking_boxes(xyz, tracking_objects)
         pose = ((raw_meta.get("dependency") or {}).get("ego_pose") or {}).get("pose")
         static_agg = {"xyz_map": xyz_map, "labels": static_labels, "lidar_ids": static_lidar}
@@ -169,6 +217,12 @@ def main() -> int:
             "tracking_dynamic_point_count": int(dynamic_mask.sum()),
             "tracked_point_count": int((track_ordinal > 0).sum()),
         }
+        meta["od_boxes"] = {
+            "source": "raw_data_frames_lidar14_0813.dependency.lidar_objects",
+            "coordinate_system": "imu_vehicle_xyz",
+            "id_association": "nearest unique dependency.oracle.object_id within 5m",
+            "objects": annotated_objects,
+        }
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2))
         entry["n_occ_variants"] = {"litept": baseline["n"], "tracking": tracking_refs["n"]}
 
@@ -198,6 +252,7 @@ def main() -> int:
                         "litept": {"frame_document_id": str(baseline_doc["_id"]) if baseline_doc else None, "assets": ((baseline_doc or {}).get("assets") or {}).get("occupancy")},
                         "tracking": {"algorithm": "oriented_lidar_object_boxes/v1", "assets": mongo_assets},
                     },
+                    "od_boxes": meta["od_boxes"],
                     "stats": {"litept_n_occ": baseline["n"], "tracking_n_occ": tracking_refs["n"], "tracking_objects": len(tracking_objects), "tracking_dynamic_points": int(dynamic_mask.sum())},
                     "updated_at": datetime.now(timezone.utc),
                 }, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
