@@ -146,6 +146,7 @@ def export_frame(
     occ_min_points: int,
     export_points: bool,
     max_export_points: int,
+    ego_filter: dict | None,
 ) -> dict:
     fr = clip_dir / "frames" / ts
     meta = json.loads((fr / "frame.json").read_text())
@@ -167,6 +168,9 @@ def export_frame(
         pred = _h.infer_frame(model, coord, strength, device, grid_size)
         pred_dir.mkdir(parents=True, exist_ok=True)
         np.save(pred_path, pred.astype(np.int32))
+
+    ego_keep, ego_filter_stats = sag.ground_aware_ego_keep_mask(coord, pred, ego_filter)
+    coord, pred, lidar_ids = coord[ego_keep], pred[ego_keep], lidar_ids[ego_keep]
 
     lab_s = np.zeros((0,), np.int32)
     lid_s = np.zeros((0,), np.int32)
@@ -351,7 +355,9 @@ def export_frame(
             "n_static_roi": int(xyz_s.shape[0]),
             "n_vis_points": int(vis_xyz.shape[0]),
             "n_points_exported": n_points_exported,
+            "ego_filter_removed": int(ego_filter_stats["removed"]),
         },
+        "ego_filter": {"config": ego_filter, "stats": ego_filter_stats},
         "assets": {
             "occupancy": {
                 "n": n_occ,
@@ -431,6 +437,11 @@ def main() -> int:
     ap.add_argument("--z-max", type=float, default=20.0)
     ap.add_argument("--export-points", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--max-export-points", type=int, default=200000)
+    ap.add_argument("--ego-filter", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--ego-x-range", type=float, nargs=2, default=(-1.65, 1.65))
+    ap.add_argument("--ego-y-range", type=float, nargs=2, default=(-1.0, 2.5))
+    ap.add_argument("--ego-min-height", type=float, default=0.20)
+    ap.add_argument("--ego-max-height", type=float, default=4.0)
     args = ap.parse_args()
 
     clip_dir = (ROOT / args.backup_root / args.clip).resolve()
@@ -457,6 +468,15 @@ def main() -> int:
     x_range = (-args.bev_x_half, args.bev_x_half)
     y_range = (args.bev_y_min, args.bev_y_max)
     z_range = (args.z_min, args.z_max)
+    ego_filter = {
+        "enabled": bool(args.ego_filter),
+        "x_range": list(args.ego_x_range),
+        "y_range": list(args.ego_y_range),
+        "min_height": args.ego_min_height,
+        "max_height": args.ego_max_height,
+        "ground_fit_margin": 0.5,
+        "method": "semantic_ground_robust_plane/v1",
+    }
 
     static_agg = None
     if args.aggregate_static:
@@ -481,6 +501,7 @@ def main() -> int:
             voxel=args.static_voxel,
             cache_path=cache_path,
             use_oracle_boxes=True,
+            ego_filter=ego_filter,
         )
         if static_agg["xyz_map"].shape[0] == 0 and args.reuse_pred:
             static_agg = sag.load_or_build_static_aggregate(
@@ -496,6 +517,7 @@ def main() -> int:
                 voxel=args.static_voxel,
                 cache_path=cache_path,
                 use_oracle_boxes=True,
+                ego_filter=ego_filter,
             )
         print(f"static_agg N={static_agg['xyz_map'].shape[0]}")
         # Mirror static_agg into the scene package (map frame; frames only apply pose).
@@ -549,6 +571,7 @@ def main() -> int:
                 "y": "forward",
                 "z": "up",
             },
+            "ego_filter": ego_filter,
         },
         "taxonomy": {
             "fine": {
@@ -590,6 +613,7 @@ def main() -> int:
             occ_min_points=args.occ_min_points,
             export_points=args.export_points,
             max_export_points=args.max_export_points,
+            ego_filter=ego_filter,
         )
         index["frames"].append(
             {
