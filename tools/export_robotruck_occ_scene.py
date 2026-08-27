@@ -423,6 +423,7 @@ def main() -> int:
     ap.add_argument("--grid-size", type=float, default=0.05)
     ap.add_argument("--stride", type=int, default=2)
     ap.add_argument("--max-frames", type=int, default=3)
+    ap.add_argument("--skip-initial-seconds", type=float, default=1.0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--reuse-pred", action="store_true")
     ap.add_argument("--aggregate-static", action=argparse.BooleanOptionalAction, default=True)
@@ -437,6 +438,10 @@ def main() -> int:
     ap.add_argument("--z-max", type=float, default=20.0)
     ap.add_argument("--export-points", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--max-export-points", type=int, default=200000)
+    ap.add_argument("--pose-quality-gate", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--pose-blocked-tags", nargs="*", default=["tunnel"])
+    ap.add_argument("--pose-max-seconds-since-update", type=float, default=5.0)
+    ap.add_argument("--pose-max-horizontal-std", type=float, default=2.0)
     ap.add_argument("--ego-filter", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--ego-x-range", type=float, nargs=2, default=(-1.65, 1.65))
     ap.add_argument("--ego-y-range", type=float, nargs=2, default=(-1.0, 2.5))
@@ -448,18 +453,34 @@ def main() -> int:
     if not clip_dir.is_dir():
         raise FileNotFoundError(clip_dir)
     scene_root = (ROOT / args.out_dir / args.clip).resolve()
-    scene_root.mkdir(parents=True, exist_ok=True)
     pred_dir = (
         Path(args.pred_dir).resolve()
         if args.pred_dir
         else (ROOT / "exp/robotruck/clip_video" / args.clip / "preds").resolve()
     )
-    pred_dir.mkdir(parents=True, exist_ok=True)
 
     all_ts = list_clip_frames(clip_dir)
+    if all_ts and args.skip_initial_seconds > 0:
+        cutoff = int(all_ts[0]) + int(args.skip_initial_seconds * 1e9)
+        all_ts = [ts for ts in all_ts if int(ts) >= cutoff]
+        print(f"skip initial {args.skip_initial_seconds:g}s -> first={all_ts[0] if all_ts else 'none'}")
     timestamps = all_ts[:: max(1, args.stride)]
     if args.max_frames > 0:
         timestamps = timestamps[: args.max_frames]
+    pose_quality = sag.assess_clip_pose_quality(
+        clip_dir,
+        all_ts,
+        blocked_tags=frozenset(args.pose_blocked_tags),
+        max_seconds_since_update=args.pose_max_seconds_since_update,
+        max_horizontal_std=args.pose_max_horizontal_std,
+    )
+    if args.pose_quality_gate and not pose_quality["allow_static_aggregation"]:
+        pose_quality["action"] = "clip_rejected"
+        raise RuntimeError("POSE_QUALITY_REJECTED: " + json.dumps(pose_quality, sort_keys=True))
+    else:
+        pose_quality["action"] = "static_aggregation_allowed"
+    scene_root.mkdir(parents=True, exist_ok=True)
+    pred_dir.mkdir(parents=True, exist_ok=True)
     print(f"export clip={args.clip} frames={len(timestamps)}")
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -563,6 +584,7 @@ def main() -> int:
         "scene_id": args.clip,
         "clip_id": args.clip,
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "pose_quality": pose_quality,
         "defaults": {
             "occ_voxel": args.occ_voxel,
             "roi": {"x": [-24.0, 24.0], "y": [-25.0, 150.0], "z": [-5.0, 3.0]},

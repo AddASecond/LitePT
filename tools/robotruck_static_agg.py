@@ -9,6 +9,7 @@ is no dense point↔track association in the backup.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -30,6 +31,57 @@ WAYMO_DYNAMIC_IDS = frozenset(
 )
 WAYMO_STATIC_IDS = frozenset(range(22)) - WAYMO_DYNAMIC_IDS
 WAYMO_GROUND_IDS = frozenset({17, 18, 19, 20, 21})
+
+def assess_clip_pose_quality(
+    clip_dir: Path,
+    timestamps: list[str],
+    *,
+    blocked_tags: frozenset[str] = frozenset({"tunnel"}),
+    max_seconds_since_update: float = 5.0,
+    max_horizontal_std: float = 2.0,
+) -> dict:
+    """Return a fail-closed decision for cross-frame static aggregation."""
+    clip_meta_path = clip_dir / "clip.json"
+    clip_meta = json.loads(clip_meta_path.read_text()) if clip_meta_path.is_file() else {}
+    tags = set(clip_meta.get("tag") or [])
+    reasons = [f"blocked_tag:{tag}" for tag in sorted(tags & blocked_tags)]
+    seconds_since_update = []
+    horizontal_std = []
+    missing = 0
+    for ts in timestamps:
+        path = clip_dir / "frames" / ts / "frame.json"
+        meta = json.loads(path.read_text()) if path.is_file() else {}
+        gnss = ((meta.get("dependency") or {}).get("gnss") or {})
+        if not gnss:
+            missing += 1
+            continue
+        if gnss.get("seconds_since_update") is not None:
+            seconds_since_update.append(float(gnss["seconds_since_update"]))
+        lat_std, lon_std = gnss.get("latitude_std"), gnss.get("longitude_std")
+        if lat_std is not None and lon_std is not None:
+            horizontal_std.append(float(np.hypot(lat_std, lon_std)))
+    missing_ratio = missing / max(1, len(timestamps))
+    median_update = float(np.median(seconds_since_update)) if seconds_since_update else None
+    median_std = float(np.median(horizontal_std)) if horizontal_std else None
+    if missing_ratio > 0.1:
+        reasons.append(f"missing_gnss_ratio:{missing_ratio:.3f}")
+    if median_update is None or median_update > max_seconds_since_update:
+        reasons.append(f"seconds_since_update:{median_update}")
+    if median_std is None or median_std > max_horizontal_std:
+        reasons.append(f"horizontal_std:{median_std}")
+    return {
+        "allow_static_aggregation": not reasons,
+        "reasons": reasons,
+        "tags": sorted(tags),
+        "missing_gnss_ratio": missing_ratio,
+        "median_seconds_since_update": median_update,
+        "median_horizontal_std": median_std,
+        "thresholds": {
+            "max_seconds_since_update": max_seconds_since_update,
+            "max_horizontal_std": max_horizontal_std,
+            "blocked_tags": sorted(blocked_tags),
+        },
+    }
 
 
 def ground_aware_ego_keep_mask(xyz: np.ndarray, labels: np.ndarray, config: dict | None) -> tuple[np.ndarray, dict]:
@@ -134,10 +186,33 @@ def points_in_oracle_boxes(
     return mask
 
 
+def points_in_lidar_od_prelabel_boxes(
+    xyz_veh: np.ndarray, objects: list[dict], *, margin: float = 0.15,
+) -> np.ndarray:
+    """Mask points in oriented lidar_od_prelabel boxes."""
+    mask = np.zeros(len(xyz_veh), dtype=bool)
+    for obj in objects:
+        box = obj.get("box_lidar")
+        if not isinstance(box, list) or len(box) < 7:
+            continue
+        x, y, z, length, width, height, yaw = map(float, box[:7])
+        delta = xyz_veh - np.array([x, y, z], dtype=np.float32)
+        c, s = np.cos(yaw), np.sin(yaw)
+        local_x = c * delta[:, 0] + s * delta[:, 1]
+        local_y = -s * delta[:, 0] + c * delta[:, 1]
+        mask |= (
+            (np.abs(local_x) <= 0.5 * length + margin)
+            & (np.abs(local_y) <= 0.5 * width + margin)
+            & (np.abs(delta[:, 2]) <= 0.5 * height + margin)
+        )
+    return mask
+
+
 def static_mask_from_labels(
     labels: np.ndarray,
     xyz_veh: np.ndarray | None = None,
     oracle_objects: list[dict] | None = None,
+    lidar_od_objects: list[dict] | None = None,
 ) -> np.ndarray:
     """True = keep for static aggregation."""
     lab = np.asarray(labels).astype(np.int64).reshape(-1)
@@ -145,6 +220,8 @@ def static_mask_from_labels(
     if xyz_veh is not None and oracle_objects:
         in_box = points_in_oracle_boxes(xyz_veh, oracle_objects)
         keep &= ~in_box
+    if xyz_veh is not None and lidar_od_objects:
+        keep &= ~points_in_lidar_od_prelabel_boxes(xyz_veh, lidar_od_objects)
     return keep
 
 
@@ -192,13 +269,35 @@ def load_or_build_static_aggregate(
     max_points_per_frame: int = 120000,
     seed: int = 0,
     ego_filter: dict | None = None,
+    require_deskew: bool = True,
 ) -> dict:
     """Return dict with xyz_map, labels, lidar_ids (map frame), meta."""
+    fingerprint_rows = []
+    for ts in timestamps:
+        frame = clip_dir / "frames" / ts
+        meta_path = frame / "frame.json"
+        pred_path = pred_dir / f"{ts}_pred.npy"
+        if not meta_path.is_file():
+            continue
+        meta = json.loads(meta_path.read_text())
+        deskew = (((meta.get("dependency") or {}).get("sensors") or {}).get("lidar_merge_deskew") or {})
+        fingerprint_rows.append({
+            "timestamp": ts,
+            "deskew_md5": deskew.get("md5"),
+            "pose": ((meta.get("dependency") or {}).get("ego_pose") or {}).get("pose"),
+            "od_source": (((meta.get("groundtruth") or {}).get("lidar_od_prelabel") or {}).get("source_version")),
+            "pred_size": pred_path.stat().st_size if pred_path.is_file() else None,
+            "pred_mtime_ns": pred_path.stat().st_mtime_ns if pred_path.is_file() else None,
+        })
+    expected_fingerprint = hashlib.sha256(json.dumps({
+        "schema": "static_aggregate/v2", "frames": fingerprint_rows,
+        "voxel": voxel, "grid_size": grid_size, "ego_filter": ego_filter or {},
+        "use_oracle_boxes": use_oracle_boxes, "require_deskew": require_deskew,
+    }, sort_keys=True).encode()).hexdigest()
     if cache_path is not None and cache_path.is_file():
         data = np.load(cache_path, allow_pickle=False)
-        expected = json.dumps(ego_filter or {}, sort_keys=True)
-        stored = str(data["ego_filter_json"][0]) if "ego_filter_json" in data else ""
-        if stored == expected:
+        stored = str(data["source_fingerprint"][0]) if "source_fingerprint" in data else ""
+        if stored == expected_fingerprint:
             return {
                 "xyz_map": data["xyz_map"].astype(np.float32),
                 "labels": data["labels"].astype(np.int32),
@@ -221,6 +320,9 @@ def load_or_build_static_aggregate(
         if not lidar_path.is_file():
             continue
         meta = json.loads((fr / "frame.json").read_text())
+        deskew = (((meta.get("dependency") or {}).get("sensors") or {}).get("lidar_merge_deskew") or {})
+        if require_deskew and not deskew.get("md5"):
+            raise ValueError(f"{ts}: lidar_merge_deskew metadata is missing")
         pose = (meta.get("dependency") or {}).get("ego_pose", {}).get("pose")
         if not pose:
             continue
@@ -253,8 +355,12 @@ def load_or_build_static_aggregate(
                 (meta.get("dependency") or {}).get("oracle", {}) or {}
             ).get("objects") or []
 
+        lidar_od_objs = (
+            ((meta.get("groundtruth") or {}).get("lidar_od_prelabel") or {})
+        ).get("objects") or []
+
         ego_keep, _ = ground_aware_ego_keep_mask(coord, pred, ego_filter)
-        keep = static_mask_from_labels(pred, coord, oracle_objs) & ego_keep
+        keep = static_mask_from_labels(pred, coord, oracle_objs, lidar_od_objs) & ego_keep
         if not np.any(keep):
             continue
 
@@ -308,6 +414,7 @@ def load_or_build_static_aggregate(
             n_frames=np.array([out["n_frames"]], dtype=np.int32),
             voxel=np.array([out["voxel"]], dtype=np.float32),
             ego_filter_json=np.array([json.dumps(ego_filter or {}, sort_keys=True)]),
+            source_fingerprint=np.array([expected_fingerprint]),
         )
         print(f"  [static-agg] cached -> {cache_path}", flush=True)
     return out
