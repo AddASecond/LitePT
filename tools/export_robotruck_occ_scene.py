@@ -42,6 +42,7 @@ def _load(name: str, rel: str):
 
 _h = _load("infer_robotruck_mongo_frame", "tools/infer_robotruck_mongo_frame.py")
 sag = _load("robotruck_static_agg", "tools/robotruck_static_agg.py")
+qgate = _load("robotruck_quality_gate", "tools/robotruck_quality_gate.py")
 occmod = _load("robotruck_occupancy", "tools/robotruck_occupancy.py")
 vis = _load("visualize_mod", "visualize.py")
 
@@ -438,10 +439,10 @@ def main() -> int:
     ap.add_argument("--z-max", type=float, default=20.0)
     ap.add_argument("--export-points", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--max-export-points", type=int, default=200000)
-    ap.add_argument("--pose-quality-gate", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--pose-blocked-tags", nargs="*", default=["tunnel"])
-    ap.add_argument("--pose-max-seconds-since-update", type=float, default=5.0)
-    ap.add_argument("--pose-max-horizontal-std", type=float, default=2.0)
+    ap.add_argument("--geometry-quality-gate", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--layer-threshold", type=float, default=0.22)
+    ap.add_argument("--pose-shift-threshold", type=float, default=0.40)
+    ap.add_argument("--quality-sample-frames", type=int, default=5)
     ap.add_argument("--ego-filter", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--ego-x-range", type=float, nargs=2, default=(-1.65, 1.65))
     ap.add_argument("--ego-y-range", type=float, nargs=2, default=(-1.0, 2.5))
@@ -467,18 +468,18 @@ def main() -> int:
     timestamps = all_ts[:: max(1, args.stride)]
     if args.max_frames > 0:
         timestamps = timestamps[: args.max_frames]
-    pose_quality = sag.assess_clip_pose_quality(
+    geometry_quality = qgate.assess_clip_geometry(
         clip_dir,
         all_ts,
-        blocked_tags=frozenset(args.pose_blocked_tags),
-        max_seconds_since_update=args.pose_max_seconds_since_update,
-        max_horizontal_std=args.pose_max_horizontal_std,
+        sample_frames=args.quality_sample_frames,
+        layer_threshold=args.layer_threshold,
+        pose_shift_threshold=args.pose_shift_threshold,
     )
-    if args.pose_quality_gate and not pose_quality["allow_static_aggregation"]:
-        pose_quality["action"] = "clip_rejected"
-        raise RuntimeError("POSE_QUALITY_REJECTED: " + json.dumps(pose_quality, sort_keys=True))
+    if args.geometry_quality_gate and not geometry_quality["allow_occ"]:
+        geometry_quality["action"] = "clip_rejected"
+        raise RuntimeError("GEOMETRY_QUALITY_REJECTED: " + json.dumps(geometry_quality, sort_keys=True))
     else:
-        pose_quality["action"] = "static_aggregation_allowed"
+        geometry_quality["action"] = "occ_allowed"
     scene_root.mkdir(parents=True, exist_ok=True)
     pred_dir.mkdir(parents=True, exist_ok=True)
     print(f"export clip={args.clip} frames={len(timestamps)}")
@@ -584,7 +585,7 @@ def main() -> int:
         "scene_id": args.clip,
         "clip_id": args.clip,
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "pose_quality": pose_quality,
+        "geometry_quality": geometry_quality,
         "defaults": {
             "occ_voxel": args.occ_voxel,
             "roi": {"x": [-24.0, 24.0], "y": [-25.0, 150.0], "z": [-5.0, 3.0]},

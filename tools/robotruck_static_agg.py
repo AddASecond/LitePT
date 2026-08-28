@@ -32,56 +32,6 @@ WAYMO_DYNAMIC_IDS = frozenset(
 WAYMO_STATIC_IDS = frozenset(range(22)) - WAYMO_DYNAMIC_IDS
 WAYMO_GROUND_IDS = frozenset({17, 18, 19, 20, 21})
 
-def assess_clip_pose_quality(
-    clip_dir: Path,
-    timestamps: list[str],
-    *,
-    blocked_tags: frozenset[str] = frozenset({"tunnel"}),
-    max_seconds_since_update: float = 5.0,
-    max_horizontal_std: float = 2.0,
-) -> dict:
-    """Return a fail-closed decision for cross-frame static aggregation."""
-    clip_meta_path = clip_dir / "clip.json"
-    clip_meta = json.loads(clip_meta_path.read_text()) if clip_meta_path.is_file() else {}
-    tags = set(clip_meta.get("tag") or [])
-    reasons = [f"blocked_tag:{tag}" for tag in sorted(tags & blocked_tags)]
-    seconds_since_update = []
-    horizontal_std = []
-    missing = 0
-    for ts in timestamps:
-        path = clip_dir / "frames" / ts / "frame.json"
-        meta = json.loads(path.read_text()) if path.is_file() else {}
-        gnss = ((meta.get("dependency") or {}).get("gnss") or {})
-        if not gnss:
-            missing += 1
-            continue
-        if gnss.get("seconds_since_update") is not None:
-            seconds_since_update.append(float(gnss["seconds_since_update"]))
-        lat_std, lon_std = gnss.get("latitude_std"), gnss.get("longitude_std")
-        if lat_std is not None and lon_std is not None:
-            horizontal_std.append(float(np.hypot(lat_std, lon_std)))
-    missing_ratio = missing / max(1, len(timestamps))
-    median_update = float(np.median(seconds_since_update)) if seconds_since_update else None
-    median_std = float(np.median(horizontal_std)) if horizontal_std else None
-    if missing_ratio > 0.1:
-        reasons.append(f"missing_gnss_ratio:{missing_ratio:.3f}")
-    if median_update is None or median_update > max_seconds_since_update:
-        reasons.append(f"seconds_since_update:{median_update}")
-    if median_std is None or median_std > max_horizontal_std:
-        reasons.append(f"horizontal_std:{median_std}")
-    return {
-        "allow_static_aggregation": not reasons,
-        "reasons": reasons,
-        "tags": sorted(tags),
-        "missing_gnss_ratio": missing_ratio,
-        "median_seconds_since_update": median_update,
-        "median_horizontal_std": median_std,
-        "thresholds": {
-            "max_seconds_since_update": max_seconds_since_update,
-            "max_horizontal_std": max_horizontal_std,
-            "blocked_tags": sorted(blocked_tags),
-        },
-    }
 
 
 def ground_aware_ego_keep_mask(xyz: np.ndarray, labels: np.ndarray, config: dict | None) -> tuple[np.ndarray, dict]:

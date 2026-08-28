@@ -176,7 +176,7 @@ def main() -> int:
             "model": {"name": "litept-small-waymo-semseg", "version": args.model_version, "taxonomy": "waymo-22"},
             "coordinate": meta.get("coordinate"), "grid": meta.get("grid"), "stats": meta.get("stats"),
             "assets": assets, "ego_pose": ((raw.get("dependency") or {}).get("ego_pose")),
-            "provenance": {"intermediate_scene": str(scene), "scene_schema_version": index.get("schema_version"), "pose_quality": index.get("pose_quality")},
+            "provenance": {"intermediate_scene": str(scene), "scene_schema_version": index.get("schema_version"), "geometry_quality": index.get("geometry_quality", index.get("pose_quality"))},
             "updated_at": now,
         }
         occ_frames.update_one(
@@ -196,7 +196,7 @@ def main() -> int:
         "frame_collection": occ_frame_name, "frame_count": len(prepared), "start_timestamp": min(timestamps), "end_timestamp": max(timestamps),
         "model": {"name": "litept-small-waymo-semseg", "version": args.model_version, "taxonomy": "waymo-22"},
         "static_agg": static, "taxonomy": index.get("taxonomy"), "defaults": index.get("defaults"),
-        "pose_quality": index.get("pose_quality"),
+        "geometry_quality": index.get("geometry_quality", index.get("pose_quality")),
         "status": {"state": "complete", "processed_frames": len(prepared), "failed_frames": 0}, "updated_at": now,
     }
     occ_clips.update_one(
