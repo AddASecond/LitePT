@@ -36,6 +36,11 @@ function pointsAsset(meta, key) {
   return null;
 }
 
+function frameSensorPointsAsset(meta, key) {
+  const a = meta.assets && meta.assets.frame_sensor_points && meta.assets.frame_sensor_points[key];
+  return a && a.uri ? assetUrl(a.uri, frameDir) : null;
+}
+
 function camImageUrl(cam) {
   if (cam.image && cam.image.uri) return assetUrl(cam.image.uri);
   if (cam.file) return assetUrl(cam.file, frameDir);
@@ -68,7 +73,15 @@ const el = {
   occRebuildHint: document.getElementById("occRebuildHint"),
   projMode: document.getElementById("projMode"),
   projRadius: document.getElementById("projRadius"),
+  projRadiusValue: document.getElementById("projRadiusValue"),
   projAlpha: document.getElementById("projAlpha"),
+  projAlphaValue: document.getElementById("projAlphaValue"),
+  projColorMode: document.getElementById("projColorMode"),
+  projClassFilter: document.getElementById("projClassFilter"),
+  projHeightMin: document.getElementById("projHeightMin"),
+  projHeightMax: document.getElementById("projHeightMax"),
+  projPointSource: document.getElementById("projPointSource"),
+  projDistortion: document.getElementById("projDistortion"),
   btnRefreshProj: document.getElementById("btnRefreshProj"),
   btnFit: document.getElementById("btnFit"),
   classLegend: document.getElementById("classLegend"),
@@ -131,6 +144,9 @@ let exportedOcc = null; // { voxel, ijk: Int32Array, labels: Uint8Array }
 let ptXYZ = null;
 let ptLabels = null;
 let ptLidar = null; // Uint8Array lidar_id per point
+let framePtXYZ = null; // current-frame deskew points, before static aggregation
+let framePtLabels = null;
+let framePtLidar = null;
 /** Clip-level static in map frame (same points every frame; only pose changes). */
 let staticAgg = null; // { xyz: Float32Array, labels: Uint8Array, lidar: Uint8Array, n, voxel }
 let roiHelper = null;
@@ -475,7 +491,10 @@ function mergeStaticAndDynamicPoints(staticPart, dynXYZ, dynLab, dynLid) {
 
 async function loadStaticAggFromIndex() {
   staticAgg = null;
-  const sa = index && index.static_agg;
+  const pointAgg = index && index.point_aggregate;
+  const staticVariants = index && index.static_agg_variants;
+  const sa = pointAgg || (staticVariants && staticVariants[currentOccVariant]) ||
+    (index && index.static_agg);
   if (!sa || !sa.xyz_map || !sa.labels) return;
   const xyzBuf = await fetchBin(assetUrl(sa.xyz_map.uri));
   const labBuf = await fetchBin(assetUrl(sa.labels.uri));
@@ -489,8 +508,9 @@ async function loadStaticAggFromIndex() {
     lidar: lid,
     n: sa.n || new Uint8Array(labBuf).length,
     voxel: sa.voxel || 0.25,
+    full: Boolean(pointAgg),
   };
-  setStatus(`static_agg loaded · n=${staticAgg.n.toLocaleString()}`);
+  setStatus(`${staticAgg.full ? "full point aggregate" : "static_agg"} loaded · n=${staticAgg.n.toLocaleString()}`);
 }
 
 function fineToCoarse(lab) {
@@ -979,7 +999,7 @@ function fitCamera(meta) {
 
 function projectOneVeh(x, y, z, cam, useDistortion = true) {
   const K = cam.K;
-  const T = cam.T_c_v;
+  const T = cam.T_c_v_lidar_ref || cam.T_c_v;
   const fx = K[0],
     fy = K[4],
     cx = K[2],
@@ -1014,6 +1034,10 @@ function projectOneVeh(x, y, z, cam, useDistortion = true) {
   const v = fy * yn + cy;
   if (!Number.isFinite(u) || !Number.isFinite(v)) return null;
   return { u, v, z: zc };
+}
+
+function projectionUsesDistortion() {
+  return Boolean(el.projDistortion && el.projDistortion.checked);
 }
 
 /**
@@ -1060,7 +1084,7 @@ function projectOccCubes(cam, maxCells = 60000) {
     const cx = 0.5 * (xa + xb);
     const cy = 0.5 * (ya + yb);
     const cz = 0.5 * (za + zb);
-    const cProj = projectOneVeh(cx, cy, cz, cam, true);
+    const cProj = projectOneVeh(cx, cy, cz, cam, projectionUsesDistortion());
     if (!cProj || cProj.z < nearZ) continue;
     // Center must land inside the image — otherwise corner hulls become
     // huge radial wings (esp. camera17 / strong radtan).
@@ -1089,7 +1113,7 @@ function projectOccCubes(cam, maxCells = 60000) {
         corners3[c][1],
         corners3[c][2],
         cam,
-        true
+        projectionUsesDistortion()
       );
       // All 8 corners must be valid — partial cubes → huge warped shards.
       if (!p || p.z < nearZ) {
@@ -1169,8 +1193,10 @@ function fillStyleForOccLab(lab) {
 
 function projectVehToImage(xyz, labels, cam, maxN = 120000, lidarIds = null) {
   const K = cam.K;
-  const T = cam.T_c_v;
-  const dist = cam.dist5 || [0, 0, 0, 0, 0];
+  const T = cam.T_c_v_lidar_ref || cam.T_c_v;
+  const dist = projectionUsesDistortion()
+    ? (cam.dist5 || [0, 0, 0, 0, 0])
+    : [0, 0, 0, 0, 0];
   const w = cam.width;
   const h = cam.height;
   const fx = K[0], fy = K[4], cx = K[2], cy = K[5];
@@ -1179,6 +1205,9 @@ function projectVehToImage(xyz, labels, cam, maxN = 120000, lidarIds = null) {
   const step = nAll > maxN ? Math.ceil(nAll / maxN) : 1;
   const out = [];
   for (let i = 0; i < nAll; i += step) {
+    if (lidarIds && !lidarVisible(lidarIds[i])) continue;
+    const classFilter = el.projClassFilter ? el.projClassFilter.value : "all";
+    if (classFilter !== "all" && labels[i] !== Number(classFilter)) continue;
     const o = i * 3;
     const x = xyz[o], y = xyz[o + 1], z = xyz[o + 2];
     const xc = T[0] * x + T[1] * y + T[2] * z + T[3];
@@ -1202,12 +1231,32 @@ function projectVehToImage(xyz, labels, cam, maxN = 120000, lidarIds = null) {
       z: zc,
       lab: labels[i],
       lid: lidarIds ? lidarIds[i] : 0,
+      zVeh: z,
       fx,
       fy,
     });
   }
   out.sort((a, b) => b.z - a.z);
   return out;
+}
+
+function heightRgbCss(z, zMin, zMax) {
+  const span = Math.max(1e-6, zMax - zMin);
+  const t = Math.max(0, Math.min(1, (z - zMin) / span));
+  // Deliberately discrete and non-adjacent in RGB space. Smooth ramps hide
+  // sub-metre objects; these bands make a cone cross several obvious colors.
+  const bands = [
+    [25, 25, 210],
+    [0, 120, 255],
+    [0, 235, 255],
+    [0, 220, 80],
+    [245, 245, 0],
+    [255, 145, 0],
+    [255, 35, 20],
+    [255, 0, 190],
+  ];
+  const rgb = bands[Math.min(bands.length - 1, Math.floor(t * bands.length))];
+  return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
 }
 
 /**
@@ -1264,19 +1313,33 @@ function drawProjectionOnCanvas(canvas, img, cam, mode, ptMinPx = 1) {
   }
 
   if (mode === "points" || mode === "both") {
-    const useFilt = pointsObj && pointsObj.userData && pointsObj.userData.projXYZ;
-    const xyz = useFilt ? pointsObj.userData.projXYZ : ptXYZ;
-    const labs = useFilt ? pointsObj.userData.projLab : ptLabels;
-    const lids = useFilt ? pointsObj.userData.projLid : ptLidar;
+    const wantFrame = !el.projPointSource || el.projPointSource.value === "frame";
+    const useFrame = wantFrame && framePtXYZ && framePtLabels;
+    const useFilt = !useFrame && pointsObj && pointsObj.userData && pointsObj.userData.projXYZ;
+    const xyz = useFrame ? framePtXYZ : (useFilt ? pointsObj.userData.projXYZ : ptXYZ);
+    const labs = useFrame ? framePtLabels : (useFilt ? pointsObj.userData.projLab : ptLabels);
+    const lids = useFrame ? framePtLidar : (useFilt ? pointsObj.userData.projLid : ptLidar);
     if (xyz && labs && labs.length) {
       const pts = projectVehToImage(xyz, labs, cam, maxN, lids);
-      const minPx = Math.max(1, ptMinPx | 0);
-      const px = Math.max(minPx, Math.round(scale));
+      const sourcePx = Math.max(1, ptMinPx | 0);
+      const px = Math.max(1, sourcePx * scale);
       const cmode = colorModeValue();
+      const heightMode = el.projColorMode && el.projColorMode.value === "height";
+      const coneOnly = el.projClassFilter && el.projClassFilter.value === "10";
+      let zMin = el.projHeightMin ? Number(el.projHeightMin.value) : -2.2;
+      let zMax = el.projHeightMax ? Number(el.projHeightMax.value) : 0.5;
+      if (!Number.isFinite(zMin)) zMin = -2.2;
+      if (!Number.isFinite(zMax)) zMax = 0.5;
+      if (zMax <= zMin) zMax = zMin + 0.1;
       for (const p of pts) {
-        ctx.globalAlpha = Math.min(0.95, alpha + 0.25);
-        ctx.fillStyle =
-          cmode === "lidar" ? rgbCssLidar(p.lid || 0) : rgbCss(p.lab);
+        // Do not add hidden opacity: dense full-frame deskew points otherwise
+        // cover the RGB image and make a successfully loaded frame look blank.
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = coneOnly
+          ? "rgb(255,80,0)"
+          : heightMode
+          ? heightRgbCss(p.zVeh, zMin, zMax)
+          : (cmode === "lidar" ? rgbCssLidar(p.lid || 0) : rgbCss(p.lab));
         ctx.fillRect(
           ox + p.u * scale - px * 0.5,
           oy + p.v * scale - px * 0.5,
@@ -1302,6 +1365,9 @@ function refreshCamProjections() {
     if (!canvas || !cam) return;
     drawProjectionOnCanvas(canvas, img, cam, mode, radius);
   });
+  if (el.lightbox.classList.contains("open") && lb.cam && lb.img) {
+    drawProjectionOnCanvas(el.lbCanvas, lb.img, lb.cam, mode, radius);
+  }
 }
 
 function applyLbTransform() {
@@ -1469,6 +1535,9 @@ async function loadFrame(frameEntry) {
   ptXYZ = null;
   ptLabels = null;
   ptLidar = null;
+  framePtXYZ = null;
+  framePtLabels = null;
+  framePtLidar = null;
   let ptsNote = "not exported";
   let frameDynXYZ = null;
   let frameDynLab = null;
@@ -1506,10 +1575,24 @@ async function loadFrame(frameEntry) {
       ptXYZ = rawXYZ;
       ptLabels = rawLab;
       ptLidar = rawLid;
+      framePtXYZ = rawXYZ;
+      framePtLabels = rawLab;
+      framePtLidar = rawLid;
       ptsNote = rawLab.length.toLocaleString();
     } catch (e) {
       ptsNote = `export broken: ${e}`;
     }
+  }
+
+  const frameSensorXyzUrl = frameSensorPointsAsset(meta, "xyz");
+  const frameSensorLabelsUrl = frameSensorPointsAsset(meta, "labels");
+  const frameSensorLidarUrl = frameSensorPointsAsset(meta, "lidar_id");
+  if (frameSensorXyzUrl && frameSensorLabelsUrl) {
+    framePtXYZ = new Float32Array(await fetchBin(frameSensorXyzUrl));
+    framePtLabels = new Uint8Array(await fetchBin(frameSensorLabelsUrl));
+    framePtLidar = frameSensorLidarUrl
+      ? new Uint8Array(await fetchBin(frameSensorLidarUrl))
+      : null;
   }
 
   // Prefer clip static_agg (map→vehicle) + frame dynamic. Same static points
@@ -1520,20 +1603,19 @@ async function loadFrame(frameEntry) {
     const zr = meta.z_range;
     const st = staticAggInVehicle(
       meta.ego_pose,
-      [xr[0] * 1.5, xr[1] * 1.5],
-      yr,
-      [zr[0] - 2, zr[1] + 5]
+      staticAgg.full ? null : [xr[0] * 1.5, xr[1] * 1.5],
+      staticAgg.full ? null : yr,
+      staticAgg.full ? null : [zr[0] - 2, zr[1] + 5]
     );
-    const merged = mergeStaticAndDynamicPoints(
-      st,
-      frameDynXYZ,
-      frameDynLab,
-      frameDynLid
-    );
+    const merged = staticAgg.full
+      ? st
+      : mergeStaticAndDynamicPoints(st, frameDynXYZ, frameDynLab, frameDynLid);
     ptXYZ = merged.xyz;
     ptLabels = merged.labels;
     ptLidar = merged.lidar;
-    ptsNote = `${merged.labels.length.toLocaleString()} (static_agg⊕dyn)`;
+    ptsNote = staticAgg.full
+      ? `${merged.labels.length.toLocaleString()} (all deskew frames, pose-only)`
+      : `${merged.labels.length.toLocaleString()} (static_agg⊕dyn)`;
     // Occupancy bins were already built from the same aggregate at export;
     // keep them (fast). Points now match: same static set, pose-only change.
     applyOccupancy(ijkArr, labArr, meta.voxel, "exported grid (static_agg⊕dyn)");
@@ -1719,6 +1801,7 @@ el.frameSelect.addEventListener("change", async () => {
   if (i >= 0) await loadFrameByIndex(i);
 });
 if (el.occVariant) {
+    await loadStaticAggFromIndex();
   el.occVariant.addEventListener("change", async () => {
     currentOccVariant = el.occVariant.value;
     await loadFrameByIndex(frameIndex);
@@ -1798,8 +1881,20 @@ el.ptSize.addEventListener("input", () => {
   }
 });
 el.projMode.addEventListener("change", refreshCamProjections);
-el.projRadius.addEventListener("input", refreshCamProjections);
-if (el.projAlpha) el.projAlpha.addEventListener("input", refreshCamProjections);
+el.projRadius.addEventListener("input", () => {
+  if (el.projRadiusValue) el.projRadiusValue.textContent = `${el.projRadius.value} px`;
+  refreshCamProjections();
+});
+if (el.projAlpha) el.projAlpha.addEventListener("input", () => {
+  if (el.projAlphaValue) el.projAlphaValue.textContent = Number(el.projAlpha.value).toFixed(2);
+  refreshCamProjections();
+});
+if (el.projColorMode) el.projColorMode.addEventListener("change", refreshCamProjections);
+if (el.projClassFilter) el.projClassFilter.addEventListener("change", refreshCamProjections);
+if (el.projHeightMin) el.projHeightMin.addEventListener("input", refreshCamProjections);
+if (el.projHeightMax) el.projHeightMax.addEventListener("input", refreshCamProjections);
+if (el.projPointSource) el.projPointSource.addEventListener("change", refreshCamProjections);
+if (el.projDistortion) el.projDistortion.addEventListener("change", refreshCamProjections);
 el.btnRefreshProj.addEventListener("click", () => {
   refreshCamProjections();
   if (el.lightbox.classList.contains("open") && lb.cam && lb.img) {
