@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Store exported Robotruck Occ assets in Mongo GridFS.
+"""Store OCC metadata in MongoDB and arrays as content-addressed files.
 
 Raw blobs are accepted only from /data/rawdata and /data/rawdata-1..-4.
-The scene directory is an inference cache, never a raw-data source.
+The scene directory is an inference cache, never a raw-data source.  Large OCC
+arrays follow the raw sensor storage pattern; MongoDB stores compact references.
 """
 from __future__ import annotations
 
@@ -10,9 +11,10 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
+import shutil
 from pathlib import Path
 
-from gridfs import GridFSBucket
 from pymongo import MongoClient
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +23,7 @@ INGEST = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(INGEST)
 RAW_ROOTS = tuple(Path(f"/data/rawdata{s}") for s in ("", "-1", "-2", "-3", "-4"))
+DEFAULT_ASSET_ROOT = Path("/data/rawdata-4/occupancy")
 
 
 def resolve_raw(md5: str, kind: str) -> Path:
@@ -41,26 +44,32 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def store(bucket, files, path: Path, key: str, metadata: dict) -> dict:
+def content_addressed_path(root: Path, digest: str, suffix: str) -> Path:
+    return root / digest[:2] / digest[2:4] / f"{digest[4:]}{suffix}"
+
+
+def store(path: Path, asset_root: Path) -> dict:
+    """Copy an immutable blob once and return its Mongo-safe reference."""
     digest = sha256(path)
-    found = files.find_one({"metadata.key": key, "metadata.sha256": digest})
-    if found:
-        file_id = found["_id"]
-    else:
-        for old in files.find({"metadata.key": key}, {"_id": 1}):
-            bucket.delete(old["_id"])
-        with path.open("rb") as stream:
-            file_id = bucket.upload_from_stream(
-                key, stream, metadata={**metadata, "key": key, "sha256": digest}
-            )
+    suffix = "".join(path.suffixes) or ".bin"
+    target = content_addressed_path(asset_root, digest, suffix)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.is_file():
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        try:
+            shutil.copyfile(path, temporary)
+            if sha256(temporary) != digest:
+                raise IOError(f"checksum mismatch while storing {path}")
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
     return {
-        "storage": "gridfs", "bucket": files.name.removesuffix(".files"),
-        "gridfs_id": file_id, "filename": key,
-        "length": path.stat().st_size, "sha256": digest,
+        "storage": "content_addressed_file", "uri": str(target),
+        "length": target.stat().st_size, "sha256": digest,
     }
 
 
-def upload_group(bucket, files, scene: Path, group: dict | None, prefix: str, source: dict):
+def upload_group(scene: Path, group: dict | None, asset_root: Path):
     if group is None:
         return None
     output = {}
@@ -73,10 +82,7 @@ def upload_group(bucket, files, scene: Path, group: dict | None, prefix: str, so
         if not path.is_file():
             raise FileNotFoundError(path)
         output[name] = {k: v for k, v in ref.items() if k != "uri"}
-        output[name].update(store(
-            bucket, files, path, f"{prefix}/{path.name}",
-            {**source, "asset": name, "dtype": ref.get("dtype"), "shape": ref.get("shape")},
-        ))
+        output[name].update(store(path, asset_root))
     return output
 
 
@@ -99,7 +105,7 @@ def main() -> int:
     ap.add_argument("--raw-clip-collection", default="")
     ap.add_argument("--database", default="perception_experiment")
     ap.add_argument("--mongo-uri", default=INGEST.DEFAULT_URI)
-    ap.add_argument("--bucket", default="occ_blobs")
+    ap.add_argument("--asset-root", type=Path, default=DEFAULT_ASSET_ROOT)
     ap.add_argument("--model-version", default="v1")
     ap.add_argument("--backup-root", default="data/robotruck_clips_backup")
     ap.add_argument("--resume", action="store_true", help="Skip frames already stored as v2")
@@ -116,7 +122,6 @@ def main() -> int:
     client.admin.command("ping")
     db = client[args.database]
     raw_frames, raw_clips = db[args.raw_frame_collection], db[raw_clip_name]
-    bucket, files = GridFSBucket(db, bucket_name=args.bucket), db[f"{args.bucket}.files"]
     occ_frames, occ_clips = db[occ_frame_name], db[occ_clip_name]
 
     prepared, clip_ids = [], set()
@@ -140,10 +145,11 @@ def main() -> int:
         raise RuntimeError(f"raw clip {clip_id} absent from {raw_clip_name}")
 
     print(json.dumps({
-        "mode": "write-gridfs" if args.write else "dry-run", "scene": str(scene),
+        "mode": "write-content-addressed" if args.write else "dry-run", "scene": str(scene),
         "frames": len(prepared), "raw_roots": [str(p) for p in RAW_ROOTS],
         "raw": {"frames": args.raw_frame_collection, "clips": raw_clip_name, "clip_id": clip_id},
-        "occ": {"frames": occ_frame_name, "clips": occ_clip_name, "bucket": args.bucket},
+        "occ": {"frames": occ_frame_name, "clips": occ_clip_name,
+                "asset_root": str(args.asset_root.resolve())},
     }, default=str, indent=2), flush=True)
     if not args.write:
         return 0
@@ -164,8 +170,8 @@ def main() -> int:
         source = {"db": args.database, "frame_collection": args.raw_frame_collection, "clip_collection": raw_clip_name, "raw_id": str(raw.get("_id")), "frame_md5": md5, "clip_id": clip_id}
         current = meta.get("assets") or {}
         assets = {
-            "occupancy": upload_group(bucket, files, scene, current.get("occupancy"), f"{occ_frame_name}/{md5}/occupancy", source),
-            "points": upload_group(bucket, files, scene, current.get("points"), f"{occ_frame_name}/{md5}/points", source),
+            "occupancy": upload_group(scene, current.get("occupancy"), args.asset_root),
+            "points": upload_group(scene, current.get("points"), args.asset_root),
             "cameras": cameras,
         }
         doc = {
@@ -186,7 +192,7 @@ def main() -> int:
         if number % 10 == 0 or number == len(prepared):
             print(f"uploaded {number}/{len(prepared)}", flush=True)
 
-    static = upload_group(bucket, files, scene, index.get("static_agg"), f"{occ_clip_name}/{clip_id}/static_agg", {"db": args.database, "clip_collection": raw_clip_name, "clip_id": clip_id})
+    static = upload_group(scene, index.get("static_agg"), args.asset_root)
     timestamps = [raw.get("timestamp") for _, raw, _, _, _ in prepared]
     clip_doc = {
         "schema_version": "litept_occ_clip/v2", "clip_id": clip_id,
@@ -203,7 +209,7 @@ def main() -> int:
         {"source.clip_collection": raw_clip_name, "source.clip_id": clip_id, "model.version": args.model_version},
         {"$set": clip_doc, "$setOnInsert": {"created_at": now}}, upsert=True,
     )
-    print("GridFS ingest complete", flush=True)
+    print("content-addressed OCC ingest complete", flush=True)
     return 0
 
 

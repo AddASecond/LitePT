@@ -130,18 +130,19 @@ def assess_clip_geometry(
     timestamps: list[str],
     *,
     sample_frames: int = 5,
-    pose_pair_gap: int = 5,
-    layer_threshold: float = 0.22,
+    pose_pair_gap_seconds: float = 0.5,
+    layer_threshold: float = 0.15,
     layer_reference_threshold: float = 0.05,
     layer_min_overlap: int = 300,
     pose_shift_threshold: float = 0.40,
-    pose_min_improved_pairs: int = 5,
+    pose_min_improved_pairs: int = 4,
     pose_min_sign_consistency: float = 0.80,
     pose_min_relative_improvement: float = 0.05,
     pose_max_best_loss: float = 0.18,
+    pose_max_layer_score: float = 0.01,
 ) -> dict:
     """Reject only strongly corroborated layering or pose-alignment failures."""
-    if len(timestamps) < pose_pair_gap + 2:
+    if len(timestamps) < 3:
         return {"allow_occ": False, "reasons": ["insufficient_frames"], "warnings": []}
     sample_index = np.linspace(0, len(timestamps)-1, min(sample_frames, len(timestamps)), dtype=int)
     layer_rows = []
@@ -157,13 +158,23 @@ def assess_clip_geometry(
         and reference_score is not None and reference_score < layer_reference_threshold
     )
 
-    max_anchor = len(timestamps) - pose_pair_gap - 1
-    anchors = np.linspace(0, max_anchor, min(sample_frames, max_anchor+1), dtype=int)
+    timestamp_ns = np.asarray([int(ts) for ts in timestamps], dtype=np.int64)
+    target_gap_ns = int(pose_pair_gap_seconds * 1e9)
+    candidates = []
+    for index, timestamp in enumerate(timestamp_ns):
+        next_index = int(np.searchsorted(timestamp_ns, timestamp + target_gap_ns))
+        if next_index >= len(timestamp_ns):
+            continue
+        candidates.append((index, next_index))
+    if not candidates:
+        return {"allow_occ": False, "reasons": ["insufficient_pose_time_span"], "warnings": []}
+    selected = np.linspace(0, len(candidates)-1, min(sample_frames, len(candidates)), dtype=int)
+    pose_pairs = [candidates[index] for index in selected]
     pose_rows = []
     shifts = np.linspace(-1.2, 1.2, 25)
-    for index in anchors:
+    for index, next_index in pose_pairs:
         first_points, first_meta = _load(clip_dir, timestamps[index])
-        next_points, next_meta = _load(clip_dir, timestamps[index+pose_pair_gap])
+        next_points, next_meta = _load(clip_dir, timestamps[next_index])
         first_map = _structural_map(first_points, first_meta, 0.4, 8000)
         next_map = _structural_map(next_points, next_meta, 0.4, 8000)
         p0 = _pose_matrix(first_meta["dependency"]["ego_pose"]["pose"])[:3, 3]
@@ -177,6 +188,7 @@ def assess_clip_geometry(
         best_loss = float(losses[best])
         relative_improvement = max(0.0, (loss_at_pose-best_loss) / max(1e-9, loss_at_pose))
         pose_rows.append({
+            "delta_seconds": (timestamp_ns[next_index] - timestamp_ns[index]) / 1e9,
             "shift": float(shifts[best]),
             "loss_at_pose": loss_at_pose,
             "best_loss": best_loss,
@@ -198,6 +210,8 @@ def assess_clip_geometry(
         and sign_consistency >= pose_min_sign_consistency
         and median_relative_improvement >= pose_min_relative_improvement
         and median_best_loss <= pose_max_best_loss
+        and layer_score is not None
+        and layer_score <= pose_max_layer_score
     )
     corroborated_layer_bad = layer_signal and pose_signal
 
@@ -232,10 +246,12 @@ def assess_clip_geometry(
         "thresholds": {
             "layer": layer_threshold,
             "layer_reference_1_2": layer_reference_threshold,
+            "pose_pair_gap_seconds": pose_pair_gap_seconds,
             "pose_shift": pose_shift_threshold,
             "pose_min_improved_pairs": pose_min_improved_pairs,
             "pose_min_sign_consistency": pose_min_sign_consistency,
             "pose_min_relative_improvement": pose_min_relative_improvement,
             "pose_max_best_loss": pose_max_best_loss,
+            "pose_max_layer_score": pose_max_layer_score,
         },
     }

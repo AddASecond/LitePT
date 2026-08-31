@@ -357,7 +357,10 @@ class RandomJitter(object):
 class ClipGaussianJitter(object):
     def __init__(self, scalar=0.02, store_jitter=False):
         self.scalar = scalar
-        self.mean = np.mean(3)
+        # np.random.multivariate_normal requires a length-3 mean vector to
+        # match the 3x3 identity covariance; np.mean(3) returned a scalar 3.0
+        # which caused a shape-mismatch ValueError at the first invocation.
+        self.mean = np.zeros(3, dtype=np.float64)
         self.cov = np.identity(3)
         self.quantile = 1.96
         self.store_jitter = store_jitter

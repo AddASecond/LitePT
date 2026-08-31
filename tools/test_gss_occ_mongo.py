@@ -33,9 +33,9 @@ class GssOccMongoTest(unittest.TestCase):
             "assets": {
                 "occupancy": {
                     "ijk": {
-                        "storage": "gridfs",
-                        "bucket": "occ_blobs",
-                        "gridfs_id": "asset-id",
+                        "storage": "content_addressed_file",
+                        "uri": "/data/rawdata-4/occupancy/aa/bb/blob.bin",
+                        "sha256": "b" * 64,
                         "dtype": "int32",
                         "shape": [2, 3],
                     }
@@ -53,12 +53,15 @@ class GssOccMongoTest(unittest.TestCase):
             "occ_data_groundtruths",
         )
 
-    def test_frame_keeps_raw_trace_and_gridfs_reference(self) -> None:
+    def test_frame_keeps_raw_trace_and_content_reference(self) -> None:
         result = GSS.build_gss_frame(self.frame)
         self.assertEqual(result["raw_data"]["frame_collection"], "raw_data_frames_fp_matrix")
         self.assertEqual(result["raw_data"]["document_id"], "raw-id")
         self.assertEqual(result["occupancy"]["voxel_count"], 2)
-        self.assertEqual(result["occupancy"]["assets"]["ijk"]["storage"], "gridfs")
+        self.assertEqual(
+            result["occupancy"]["assets"]["ijk"]["storage"],
+            "content_addressed_file",
+        )
 
     def test_document_matches_gss_clips_frames_layout(self) -> None:
         clip = GSS.build_gss_clip({"clip_id": "clip-1", "bag_name": "x.bag"}, [self.frame])

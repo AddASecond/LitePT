@@ -97,16 +97,34 @@ def build_occupancy(
     z_s = xyz[order, 2]
     ix_s, iy_s, iz_s = ix[order], iy[order], iz[order]
 
-    # group boundaries
-    uniq, start, counts = np.unique(key_s, return_index=True, return_counts=True)
-    keep = counts >= int(min_points)
-    start = start[keep]
-    counts = counts[keep]
+    # group boundaries (pre-filter so contiguous reduceat ranges are valid for
+    # both counts AND majority-label computation).
+    uniq, start_all, counts_all = np.unique(
+        key_s, return_index=True, return_counts=True
+    )
+
+    # Majority label per voxel: per-class counts via np.add.reduceat on the
+    # sorted label array, then argmax over class axis.  Class count loop is
+    # small (Waymo ~ 30).  This replaces the previous "first-label" bug which
+    # ignored all but the 1st point's label in each occupied voxel.
+    if lab_s.size:
+        n_class = int(lab_s.max()) + 1
+    else:
+        n_class = 1
+    n_class = max(n_class, 1)
+    per_class = np.empty((n_class, start_all.size), dtype=np.int32)
+    for c in range(n_class):
+        per_class[c] = np.add.reduceat(
+            (lab_s == c).astype(np.int32, copy=False), start_all
+        )
+    maj_lab_all = per_class.argmax(axis=0).astype(np.int32)
+
+    keep = counts_all >= int(min_points)
+    start = start_all[keep]
+    counts = counts_all[keep]
     if start.size == 0:
         return empty
-
-    # Fast per-voxel stats (no Python loop): first label in voxel + max z
-    maj_lab = lab_s[start].astype(np.int32)
+    maj_lab = maj_lab_all[keep]
     max_z = np.maximum.reduceat(z_s, start).astype(np.float32)
     ijk = np.stack([ix_s[start], iy_s[start], iz_s[start]], axis=1).astype(np.int32)
 
@@ -408,16 +426,22 @@ def render_occ_camera_view(
     fx = float(K[0, 0])
     rad = np.clip((0.5 * occ.voxel * fx / np.maximum(z, 0.3)), 1.0, 10.0).astype(np.int32)
 
-    # Fast path: write pixels; expand near voxels with a few neighbor stamps
+    # Fast path: write pixels; expand near voxels by their projected pixel radius
+    # up to the per-voxel rad (clipped earlier to 1..10).  Must iterate up to
+    # the *actual* max radius present, otherwise voxels with rad ∈ [4..10]
+    # remain undersized.
     uu = np.clip(np.rint(uv[:, 0]).astype(np.int32), 0, width - 1)
     vv = np.clip(np.rint(uv[:, 1]).astype(np.int32), 0, height - 1)
     img[vv, uu] = cols
-    # expand by radius bins (1..3) without per-point Python circle calls
-    for r in (1, 2, 3):
+    max_r = int(rad.max()) if rad.size else 0
+    for r in range(1, max_r + 1):
         sel = rad >= r
         if not np.any(sel):
             continue
-        for du, dv in ((r, 0), (-r, 0), (0, r), (0, -r), (r, r), (r, -r), (-r, r), (-r, -r)):
+        for du, dv in (
+            (r, 0), (-r, 0), (0, r), (0, -r),
+            (r, r), (r, -r), (-r, r), (-r, -r),
+        ):
             u2 = np.clip(uu[sel] + du, 0, width - 1)
             v2 = np.clip(vv[sel] + dv, 0, height - 1)
             img[v2, u2] = cols[sel]
