@@ -356,7 +356,8 @@ if __name__ == "__main__":
     file_list = glob.glob(
         os.path.join(os.path.abspath(config.dataset_root), "*", "*.tfrecord")
     )
-    assert len(file_list) == 1150
+    # assert len(file_list) == 1150
+    assert len(file_list) == 202 # validation set
 
     # Create output directories
     for split in config.splits:

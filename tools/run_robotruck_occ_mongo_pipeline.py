@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run raw-volume LitePT inference when needed, then store Occ in Mongo GridFS."""
+"""Run raw-volume LitePT inference, then index content-addressed OCC in MongoDB."""
 from __future__ import annotations
 
 import argparse
@@ -11,6 +11,38 @@ import struct
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _setup_cuda_env() -> None:
+    # Must run BEFORE any `subprocess.run(python ...)` that uses CUDA, and
+    # before any import of torch (materialize stage is CPU, but we set it here
+    # so children inherit fixed env for the export stage).
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ.pop("_CUDA_COMPAT_PATH", None)
+    os.environ.pop("Path", None)
+    ld = os.environ.get("LD_LIBRARY_PATH", "")
+    if "/usr/lib/x86_64-linux-gnu" not in ld.split(":"):
+        head = "/usr/lib/x86_64-linux-gnu"
+        cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
+        os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
+    os.environ["HAMI_DISABLE_WARN"] = "1"
+    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
+    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
+    # Warm up CUDA in THIS process too: when we later exec the exporter via
+    # subprocess (fork+exec), HAMI's libvgpu session state for the cgroup has
+    # already been primed by our own cuInit call, which eliminates one of the
+    # main 304-producing race windows.  Ignore result – subprocess is what
+    # actually needs it.
+    try:
+        import torch as _torch
+        _ = _torch.cuda.is_available()
+    except Exception:
+        pass
+
+
+_setup_cuda_env()
+
 
 import numpy as np
 from pymongo import MongoClient
@@ -139,6 +171,7 @@ def main() -> int:
     ap.add_argument("--mongo-uri", default=INGEST.DEFAULT_URI)
     ap.add_argument("--cache-root", default="exp/robotruck/raw_volume_cache")
     ap.add_argument("--scene-root", default="exp/robotruck/occ_scenes")
+    ap.add_argument("--asset-root", default="/data/rawdata-4/occupancy")
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--force-infer", action="store_true")
@@ -158,7 +191,7 @@ def main() -> int:
         subprocess.run(command, cwd=ROOT, check=True)
     else:
         print(f"reuse existing inference scene: {scene}", flush=True)
-    store_command = [str(ROOT / ".venv_smoke/bin/python"), str(ROOT / "tools/store_robotruck_occ_gridfs.py"), "--scene", str(scene), "--raw-frame-collection", args.raw_frame_collection, "--raw-clip-collection", raw_clip_collection, "--backup-root", args.cache_root]
+    store_command = [str(ROOT / ".venv_smoke/bin/python"), str(ROOT / "tools/store_robotruck_occ_gridfs.py"), "--scene", str(scene), "--raw-frame-collection", args.raw_frame_collection, "--raw-clip-collection", raw_clip_collection, "--backup-root", args.cache_root, "--asset-root", args.asset_root]
     if args.write:
         store_command.append("--write")
     subprocess.run(store_command, cwd=ROOT, check=True)

@@ -18,9 +18,39 @@ import argparse
 import bisect
 import importlib.util
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
+
+
+def _setup_cuda_env() -> None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ.pop("_CUDA_COMPAT_PATH", None)
+    os.environ.pop("Path", None)
+    ld = os.environ.get("LD_LIBRARY_PATH", "")
+    if "/usr/lib/x86_64-linux-gnu" not in ld.split(":"):
+        head = "/usr/lib/x86_64-linux-gnu"
+        cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
+        os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
+    os.environ["HAMI_DISABLE_WARN"] = "1"
+    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
+    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
+    # CUDA init order bugfix under HAMI libvgpu.so: the first library that
+    # calls cuInit wins the vGPU-initialisation race.  cv2 / matplotlib (Qt)
+    # have their own CUDA probes and, under HAMI, occasionally return 304 on
+    # the first call which poisons torch's later init.  Initialise via torch
+    # NOW, before either numpy/cv2/matplotlib or any child import grabs it.
+    import torch as _torch
+    try:
+        _ok = _torch.cuda.is_available()
+    except Exception:
+        pass
+
+
+_setup_cuda_env()
+
 
 import numpy as np
 import torch
@@ -74,11 +104,13 @@ def list_clip_frames(clip_dir: Path) -> list[str]:
 
 
 def parse_camera(cam_doc: dict):
-    K = np.asarray(cam_doc["intrinsic"]["intrinsic"], dtype=np.float64)
+    # Defensive reshape: intrinsic / extrinsic may be stored as flat lists.
+    K = np.asarray(cam_doc["intrinsic"]["intrinsic"], dtype=np.float64).reshape(3, 3)
     dist = np.asarray(cam_doc["intrinsic"]["distortion"], dtype=np.float64).reshape(-1)
     dist5 = np.zeros(5, dtype=np.float64)
     dist5[: min(5, dist.size)] = dist[:5]
-    T_v_c = np.asarray(cam_doc["extrinsic"]["transformation"], dtype=np.float64)
+    # T_v_c = camera pose in vehicle (p_veh = T_v_c · p_cam).
+    T_v_c = np.asarray(cam_doc["extrinsic"]["transformation"], dtype=np.float64).reshape(4, 4)
     T_c_v = np.linalg.inv(T_v_c)
     w = int(cam_doc["intrinsic"]["width"])
     h = int(cam_doc["intrinsic"]["height"])
@@ -528,7 +560,7 @@ def main() -> int:
     ap.add_argument("--export-points", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--max-export-points", type=int, default=200000)
     ap.add_argument("--geometry-quality-gate", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--layer-threshold", type=float, default=0.22)
+    ap.add_argument("--layer-threshold", type=float, default=0.15)
     ap.add_argument("--pose-shift-threshold", type=float, default=0.40)
     ap.add_argument("--quality-sample-frames", type=int, default=5)
     ap.add_argument("--ego-filter", action=argparse.BooleanOptionalAction, default=True)

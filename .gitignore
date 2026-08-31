@@ -1,2 +1,30 @@
 data
 exp
+
+# ==== HAMI CUDA env bootstrap (2026-09) ====
+.cuda_env.sh.env.ready
+
+# ==== local venvs ====
+.venv/
+.venv_smoke/
+
+# ==== pycaches (already in top-level? just ensure) ====
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# ==== build artifacts ====
+libs/pointops/build/
+libs/pointops/dist/
+libs/pointops/*.egg-info/
+libs/pointrope/build/
+libs/pointrope/dist/
+libs/pointrope/*.egg-info/
+
+# ==== binary checkpoints / exported assets (not source) ====
+checkpoints/
+exp/
+data/robotruck_clips_backup/
+
+# ==== viewer backup ====
+tools/occ_viewer/app.js.orig
