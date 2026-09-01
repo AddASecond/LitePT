@@ -53,18 +53,29 @@ def render_frame(clip_dir: Path, ts: str, pose_samples, frame_idx: int) -> np.nd
     xyz = arr[:, :3]
     pred = np.load(pred_path).astype(np.int32).reshape(-1)
     cone_mask = pred == cfp.CONE_ID
+    cone_idx = np.where(cone_mask)[0]
+    clusters = cfp.cone_clusters_for_frame(clip_dir.name, ts, xyz[cone_mask])
 
     meta = rrv.json.loads((fr / "frame.json").read_text())
     sensors = meta["dependency"]["sensors"]
+    clusters = cfp.filter_clusters_by_rgb(
+        clusters, sensors, pose_samples, int(ts), fr,
+    )
+    clustered_mask, orphan_mask, centroids = cfp.masks_from_clusters(
+        len(xyz), cone_idx, clusters,
+    )
+    highlight_mask = cfp.sparse_cluster_points(xyz, cone_idx, clusters)
 
-    panels = [cfp.bev_panel(xyz, cone_mask, ts, clip_dir.name)]
+    panels = [cfp.bev_panel(xyz, clustered_mask, orphan_mask, ts, clip_dir.name)]
     for cam_name in rrv.CAM_ORDER:
         img_path = fr / f"{cam_name}.jpg"
         if not img_path.is_file() or cam_name not in sensors:
             continue
         img_bgr = cv2.cvtColor(np.array(rrv.Image.open(img_path).convert("RGB")), cv2.COLOR_RGB2BGR)
-        panel = cfp.cam_panel(img_bgr, xyz, pred, cone_mask, sensors[cam_name],
-                              pose_samples, int(ts), cam_name, frame_idx)
+        panel = cfp.cam_panel(
+            img_bgr, xyz, pred, highlight_mask, orphan_mask, centroids, sensors[cam_name],
+            pose_samples, int(ts), cam_name, frame_idx,
+        )
         panels.append(panel)  # BGR
 
     while len(panels) % 4:

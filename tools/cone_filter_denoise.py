@@ -48,6 +48,8 @@ CLUSTER_MAX_PTS = 20000
 CLUSTER_MIN_HEIGHT = 0.05  # meters (5cm)
 CLUSTER_MAX_HEIGHT = 1.50  # meters (1.5m)
 CLUSTER_MAX_RADIUS_XY = 0.60  # meters (60cm)
+# reject elongated barrier/curb streaks that pass radius_xy (p90) but span >1 cone
+CLUSTER_MAX_LENGTH_XY = 0.85  # meters — principal-axis extent in xy
 # OD threshold for "cone clip": at least one frame with >= this many class10 OD boxes
 CONE_CLIP_MIN_OD_FRAMES = 1
 CONE_CLIP_MIN_OD_BOXES_PER_FRAME = 1
@@ -180,13 +182,21 @@ def cluster_cones(xyz: np.ndarray):
             continue
         pts = xyz[ids]
         c = pts.mean(axis=0).astype(np.float32)
-        xy_ctr_abs = np.abs(pts[:, :2] - c[:2])
-        rxy = float(np.percentile(np.linalg.norm(xy_ctr_abs, axis=1), 90))
+        xy = pts[:, :2].astype(np.float64) - c[:2].astype(np.float64)
+        rxy = float(np.percentile(np.linalg.norm(xy, axis=1), 90))
         h = float(pts[:, 2].max() - pts[:, 2].min())
         if h < CLUSTER_MIN_HEIGHT or h > CLUSTER_MAX_HEIGHT:
             continue
         if rxy > CLUSTER_MAX_RADIUS_XY:
             continue
+        # principal-axis length: barrier FPs often form long thin chains
+        length_xy = 0.0
+        if m >= 3:
+            _, _, vh = np.linalg.svd(xy, full_matrices=False)
+            proj = xy @ vh[0]
+            length_xy = float(proj.max() - proj.min())
+            if length_xy > CLUSTER_MAX_LENGTH_XY:
+                continue
         clusters.append({
             "id": len(clusters),
             "centroid_xyz": c,
@@ -195,6 +205,7 @@ def cluster_cones(xyz: np.ndarray):
             "max_z": float(pts[:, 2].max()),
             "height": h,
             "radius_xy": rxy,
+            "length_xy": length_xy,
             "point_ids": ids.astype(np.int32, copy=False),
         })
     return clusters

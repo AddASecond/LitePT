@@ -147,6 +147,66 @@ def cluster_sanity(xyz: np.ndarray, labels: np.ndarray,
 
 
 # --------------------------------------------------------------------------- #
+# Pure density denoising — input is ONLY the point cloud, no labels/classes.
+# --------------------------------------------------------------------------- #
+CLOUD_SOR_K = 16
+CLOUD_SOR_ALPHA = 1.0
+CLOUD_EPS = 0.25          # eps-graph radius (metres)
+CLOUD_MIN_COMPONENT = 5   # drop connected components smaller than this
+
+
+def _component_sizes_graph(xyz: np.ndarray, eps: float) -> np.ndarray:
+    """Label of the eps-neighbourhood connected component for each point."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n = xyz.shape[0]
+    tree = cKDTree(xyz)
+    pairs = tree.query_pairs(r=eps, output_type="ndarray")
+    if pairs.size == 0:
+        return np.arange(n, dtype=np.int64)
+    g = coo_matrix((np.ones(len(pairs), np.int8),
+                    (pairs[:, 0], pairs[:, 1])), shape=(n, n))
+    _, labels = connected_components(g, directed=False)
+    return labels
+
+
+def denoise_cloud(xyz: np.ndarray, sor_k: int = CLOUD_SOR_K,
+                  sor_alpha: float = CLOUD_SOR_ALPHA,
+                  eps: float = CLOUD_EPS,
+                  min_component: int = CLOUD_MIN_COMPONENT) -> tuple[np.ndarray, dict]:
+    """Pure density denoising of a full point cloud (any classes, xyz only).
+
+    1. SOR — kNN mean-distance outlier rejection.
+    2. eps-graph connected components — components with < min_component
+       points are treated as noise and dropped.
+
+    Returns (kept_mask, info).
+    """
+    info: dict = {"n_in": int(xyz.shape[0])}
+    if xyz.shape[0] == 0:
+        info.update({"n_after_sor": 0, "n_kept": 0, "n_noise": 0, "n_components": 0})
+        return np.zeros(0, dtype=bool), info
+
+    m1 = sor_mask(xyz, sor_k, sor_alpha)
+    info["n_after_sor"] = int(m1.sum())
+
+    sub = np.where(m1)[0]
+    labels = _component_sizes_graph(xyz[sub].astype(np.float64), eps)
+    sizes = np.bincount(labels)
+    keep_sub = sizes[labels] >= min_component
+
+    kept = np.zeros(xyz.shape[0], dtype=bool)
+    kept[sub[keep_sub]] = True
+    info.update({
+        "n_kept": int(kept.sum()),
+        "n_noise": info["n_in"] - int(kept.sum()),
+        "n_components": int(sizes.size),
+    })
+    return kept, info
+
+
+# --------------------------------------------------------------------------- #
 # Full pipeline
 # --------------------------------------------------------------------------- #
 def density_denoise(xyz: np.ndarray, sor_k: int = SOR_K, sor_alpha: float = SOR_ALPHA,
@@ -255,6 +315,10 @@ def main() -> int:
     ap.add_argument("--out-root", type=Path, default=None)
     ap.add_argument("--npy", type=Path, help="single (N,3) cloud")
     ap.add_argument("--npy-out", type=Path, default=None)
+    ap.add_argument("--cloud", type=Path, help="raw full cloud (lidar_merge.bin or (N,>=3) npy); pure density denoise, no labels")
+    ap.add_argument("--cloud-out", type=Path, default=None)
+    ap.add_argument("--cloud-eps", type=float, default=CLOUD_EPS)
+    ap.add_argument("--cloud-min-component", type=int, default=CLOUD_MIN_COMPONENT)
     ap.add_argument("--sor-k", type=int, default=SOR_K)
     ap.add_argument("--sor-alpha", type=float, default=SOR_ALPHA)
     ap.add_argument("--eps", type=float, default=DBSCAN_EPS)
@@ -265,6 +329,23 @@ def main() -> int:
 
     if args.selftest:
         return selftest()
+
+    if args.cloud:
+        p = args.cloud
+        if p.suffix == ".bin":
+            arr = np.fromfile(p, dtype=np.float32).reshape(-1, 7)
+            xyz = arr[:, :3]
+        else:
+            xyz = np.load(p).astype(np.float32).reshape(-1, 3)
+        kept, info = denoise_cloud(xyz, sor_k=args.sor_k, sor_alpha=args.sor_alpha,
+                                   eps=args.cloud_eps,
+                                   min_component=args.cloud_min_component)
+        if args.cloud_out:
+            args.cloud_out.parent.mkdir(parents=True, exist_ok=True)
+            np.save(args.cloud_out, xyz[kept].astype(np.float32))
+            info["saved"] = str(args.cloud_out)
+        print(json.dumps(info, indent=2))
+        return 0
 
     if args.npy:
         xyz = np.load(args.npy).astype(np.float32).reshape(-1, 3)
