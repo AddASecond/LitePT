@@ -1,8 +1,13 @@
-"""Robotruck occupancy delivery toolkit.
+"""Robotruck occupancy toolkit.
 
-Layout (by goal):
-  Production:  quality_gate, occupancy, static_agg, export_scene, store, ingest,
-               pipeline, batch_lidar14, run_inproc, pred_warmup, gss_mongo
-  Debug/QA:    pose_badcase, layer_scan, triage_viz, validate_projection,
-               scene_video  (+ tools/occ_viewer)
+Public entrypoints (use these):
+  produce.py   delivery: export | pipeline | batch | inproc | warmup | store
+  qa.py        offline QA: scan | triage | layer | project
+  scene_video.py
+  occ_viewer/  interactive debug viewer
+
+Libraries (imported, not run):
+  quality_gate, occupancy, static_agg, gss_mongo, export_scene, store
+
+Internals live in _impl/ (do not call directly unless debugging).
 """

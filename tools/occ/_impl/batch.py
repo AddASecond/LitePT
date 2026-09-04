@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pymongo import MongoClient
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 TAGS = [
     "highway", "mountainous_winding_road", "bridge", "urban_street_scene",
     "interchange_ramp", "toll_station", "tunnel", "logistics_park",
@@ -135,7 +135,8 @@ def main() -> int:
         print(f"[{number}/{len(clips)}] START tag={tag} clip={clip_id} free={available:.2f}GiB", flush=True)
         command = [
             str(ROOT / ".venv_smoke/bin/python"),
-            str(ROOT / "tools/occ/pipeline.py"),
+            str(ROOT / "tools/occ/produce.py"),
+            "pipeline",
             "--raw-frame-collection", "raw_data_frames_lidar14_0813",
             "--raw-clip-collection", "raw_data_clips_lidar14_0813",
             "--clip-id", clip_id,

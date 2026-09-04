@@ -16,8 +16,10 @@ from pathlib import Path
 
 from pymongo import MongoClient
 
-ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("occ_ingest", ROOT / "tools/occ/ingest.py")
+ROOT = Path(__file__).resolve().parents[3]
+SPEC = importlib.util.spec_from_file_location(
+    "occ_ingest", ROOT / "tools/occ/_impl/ingest.py"
+)
 INGEST = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(INGEST)

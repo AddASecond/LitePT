@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from layer_scan import (  # noqa: E402
     CLIPS_COL,

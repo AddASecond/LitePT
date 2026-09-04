@@ -26,7 +26,7 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 assert ROOT.name == "LitePT", "run from LitePT checkout; got: " + str(ROOT)
 
 
@@ -82,7 +82,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Import project modules (runs their module-level _setup_cuda_env).
     # Reuse modules already exec'd by export (same objects; avoid double import).
-    export_mod = load_mod("export_scene", "tools/occ/export_scene.py")
+    export_mod = load_mod("export_scene", "tools/occ/_impl/export_scene.py")
     qgate = export_mod.qgate
     sag = export_mod.sag
     infer_mod = export_mod._h
@@ -90,7 +90,7 @@ def main() -> None:
     export_frame_fn = export_mod.export_frame
     pose_stamp_ns = export_mod.pose_stamp_ns
     load_segmentor = infer_mod.load_segmentor
-    store_mod = load_mod("store_gridfs", "tools/occ/store.py")
+    store_mod = load_mod("store_gridfs", "tools/occ/_impl/store.py")
 
     import torch
     gpu_ok = torch.cuda.is_available()

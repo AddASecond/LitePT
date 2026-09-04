@@ -8,7 +8,7 @@ Separates data production from visualization:
 
 Usage:
   export PYTHONPATH=./
-  .venv_smoke/bin/python tools/occ/export_scene.py \\
+  .venv_smoke/bin/python tools/occ/_impl/export_scene.py \\
     --clip stop_1784423032302844849_vehicle-V002-20260719_090818 \\
     --stride 2 --max-frames 3 --reuse-pred --occ-voxel 0.2 --export-points
 """
@@ -57,7 +57,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
