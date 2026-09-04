@@ -42,11 +42,12 @@ def _setup_cuda_env() -> None:
     # have their own CUDA probes and, under HAMI, occasionally return 304 on
     # the first call which poisons torch's later init.  Initialise via torch
     # NOW, before either numpy/cv2/matplotlib or any child import grabs it.
-    import torch as _torch
-    try:
-        _ok = _torch.cuda.is_available()
-    except Exception:
-        pass
+    if os.environ.get("LITEPT_SKIP_CUDA_WARMUP") != "1":
+        import torch as _torch
+        try:
+            _ok = _torch.cuda.is_available()
+        except Exception:
+            pass
 
 
 _setup_cuda_env()

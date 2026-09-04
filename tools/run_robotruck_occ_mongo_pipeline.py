@@ -34,11 +34,12 @@ def _setup_cuda_env() -> None:
     # already been primed by our own cuInit call, which eliminates one of the
     # main 304-producing race windows.  Ignore result – subprocess is what
     # actually needs it.
-    try:
-        import torch as _torch
-        _ = _torch.cuda.is_available()
-    except Exception:
-        pass
+    if os.environ.get("LITEPT_SKIP_CUDA_WARMUP") != "1":
+        try:
+            import torch as _torch
+            _ = _torch.cuda.is_available()
+        except Exception:
+            pass
 
 
 _setup_cuda_env()
