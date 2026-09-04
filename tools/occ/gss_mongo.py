@@ -14,10 +14,8 @@ from paths import DEFAULT_URI
 
 MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 
-
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
 
 def collection_suffix(raw_collection: str, kind: str) -> str:
     prefix = f"raw_data_{kind}"
@@ -25,11 +23,9 @@ def collection_suffix(raw_collection: str, kind: str) -> str:
         raise ValueError(f"expected collection prefix {prefix!r}: {raw_collection!r}")
     return raw_collection[len(prefix):].lstrip("_")
 
-
 def groundtruth_collection_name(raw_frame_collection: str) -> str:
     suffix = collection_suffix(raw_frame_collection, "frames")
     return "occ_data_groundtruths" + (f"_{suffix}" if suffix else "")
-
 
 def _source_reference(frame: dict[str, Any]) -> dict[str, Any]:
     source = frame.get("source") or {}
@@ -43,7 +39,6 @@ def _source_reference(frame: dict[str, Any]) -> dict[str, Any]:
         "timestamp": frame.get("timestamp"),
         "clip_id": source.get("clip_id") or frame.get("clip_id"),
     }
-
 
 def build_gss_frame(frame: dict[str, Any]) -> dict[str, Any]:
     """Convert a LitePT inference frame document to a GSS OCC frame."""
@@ -73,7 +68,6 @@ def build_gss_frame(frame: dict[str, Any]) -> dict[str, Any]:
         },
     }
 
-
 def build_gss_clip(
     raw_clip: dict[str, Any], frames: Iterable[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -96,7 +90,6 @@ def build_gss_clip(
         "frames": gss_frames,
         "frame_count": len(gss_frames),
     }
-
 
 def build_gss_document(
     *,
@@ -136,7 +129,6 @@ def build_gss_document(
         )
     return document
 
-
 def create_indexes(collection) -> None:
     collection.create_index([("run_id", ASCENDING)], unique=True, name="run_id_unique")
     collection.create_index(
@@ -152,7 +144,6 @@ def create_indexes(collection) -> None:
         [("clips.frames.raw_data.frame_collection", ASCENDING)], name="raw_frame_collection"
     )
 
-
 def publish(collection, document: dict[str, Any]) -> Any:
     """Idempotently publish one immutable run identity to the GSS collection."""
     create_indexes(collection)
@@ -161,7 +152,6 @@ def publish(collection, document: dict[str, Any]) -> Any:
         collection.replace_one({"_id": existing["_id"]}, document)
         return existing["_id"]
     return collection.insert_one(document).inserted_id
-
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
@@ -213,7 +203,6 @@ def main() -> int:
         inserted_id = publish(db[target_name], document)
         print({"_id": str(inserted_id)})
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

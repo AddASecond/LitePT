@@ -12,9 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from paths import ROOT, RAW_ROOTS, DEFAULT_URI, ensure_import_path
-
-ensure_import_path()
+from _boot import ROOT, RAW_ROOTS, DEFAULT_URI  # noqa: F401
 from validate_projection import (  # noqa: E402
     read_binary_pcd, quat_to_rotation)
 

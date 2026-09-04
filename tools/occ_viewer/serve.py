@@ -27,7 +27,15 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
 VIEWER_DIR = Path(__file__).resolve().parent
-EXPORT_SCRIPT = ROOT / "tools" / "occ" / "scene_video.py"
+EXPORT_SCRIPT = VIEWER_DIR / "scene_video.py"
+
+# C5: prefer in-process export API when importable.
+try:
+    if str(VIEWER_DIR) not in sys.path:
+        sys.path.insert(0, str(VIEWER_DIR))
+    import scene_video as _scene_video_mod
+except Exception:
+    _scene_video_mod = None
 
 
 class VideoJob:
@@ -122,6 +130,52 @@ def _run_export(scene_dir: Path, clip_id: str, params: dict) -> None:
     tile_h = int(params.get("tile_h", 540))
     max_frames = int(params.get("max_frames", 0))
 
+    with JOB.lock:
+        JOB.state = "running"
+        JOB.message = "starting exporter"
+        JOB.progress = 0.0
+        JOB.frame = 0
+        JOB.n = 0
+        JOB.path = None
+        JOB.relpath = None
+        JOB.clip_id = clip_id
+        JOB.started_at = time.time()
+        JOB.finished_at = None
+        JOB.params = dict(params)
+        status_path.write_text(json.dumps(JOB.snapshot(), indent=2))
+
+    # In-process path (same module as EXPORT_SCRIPT).
+    if _scene_video_mod is not None:
+        try:
+            with open(log_path, "w", encoding="utf-8") as logf:
+                logf.write(f"in-process scene_video.export_scene_video mode={mode}\n")
+                logf.flush()
+            result = _scene_video_mod.export_scene_video(
+                scene_dir,
+                out_path=None,
+                mode=str(mode),
+                fps=fps,
+                tile_w=tile_w,
+                tile_h=tile_h,
+                max_frames=max_frames,
+            )
+            out_p = Path(result)
+            with JOB.lock:
+                JOB.state = "done"
+                JOB.message = "done"
+                JOB.progress = 1.0
+                JOB.path = str(out_p)
+                try:
+                    JOB.relpath = str(out_p.relative_to(scene_dir))
+                except Exception:
+                    JOB.relpath = out_p.name
+                JOB.finished_at = time.time()
+                status_path.write_text(json.dumps(JOB.snapshot(), indent=2))
+            return
+        except Exception as exc:
+            with open(log_path, "a", encoding="utf-8") as logf:
+                logf.write(f"in-process failed: {exc}\nfalling back to subprocess\n")
+
     cmd = [
         _python_bin(),
         str(EXPORT_SCRIPT),
@@ -139,24 +193,10 @@ def _run_export(scene_dir: Path, clip_id: str, params: dict) -> None:
         str(max_frames),
     ]
 
-    with JOB.lock:
-        JOB.state = "running"
-        JOB.message = "starting exporter"
-        JOB.progress = 0.0
-        JOB.frame = 0
-        JOB.n = 0
-        JOB.path = None
-        JOB.relpath = None
-        JOB.clip_id = clip_id
-        JOB.started_at = time.time()
-        JOB.finished_at = None
-        JOB.params = dict(params)
-        status_path.write_text(json.dumps(JOB.snapshot(), indent=2))
-
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT) + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
 
-    with open(log_path, "w", encoding="utf-8") as logf:
+    with open(log_path, "a", encoding="utf-8") as logf:
         logf.write(" ".join(cmd) + "\n\n")
         logf.flush()
         proc = subprocess.Popen(

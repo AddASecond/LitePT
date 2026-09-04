@@ -16,10 +16,8 @@ from pymongo import ASCENDING, MongoClient
 from paths import ROOT, RAW_ROOTS, DEFAULT_ASSET_ROOT, DEFAULT_URI
 MD5_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
-
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
 
 def infer_collection(raw_name: str, source: str, target: str) -> str:
     marker = f"raw_data_{source}"
@@ -27,19 +25,16 @@ def infer_collection(raw_name: str, source: str, target: str) -> str:
         raise ValueError(f"cannot infer from collection {raw_name!r}; expected prefix {marker!r}")
     return f"raw_data_{target}{raw_name[len(marker):]}"
 
-
 def infer_occ_collection(raw_name: str) -> str:
     if not raw_name.startswith("raw_data_"):
         raise ValueError(f"raw collection must start with 'raw_data_': {raw_name}")
     return "occ_data_" + raw_name[len("raw_data_"):]
-
 
 def load_json(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
         raise ValueError(f"expected JSON object: {path}")
     return data
-
 
 def raw_lidar_md5(raw: dict[str, Any]) -> str | None:
     sensors = ((raw.get("dependency") or {}).get("sensors") or {})
@@ -48,7 +43,6 @@ def raw_lidar_md5(raw: dict[str, Any]) -> str | None:
         if isinstance(value, str) and MD5_RE.fullmatch(value):
             return value.lower()
     return None
-
 
 def md5_from_backup(scene_frame: dict[str, Any], backup_root: Path | None) -> str | None:
     for value in (
@@ -75,7 +69,6 @@ def md5_from_backup(scene_frame: dict[str, Any], backup_root: Path | None) -> st
             return value.lower()
     return None
 
-
 def find_raw_frame(collection, md5: str, timestamp: int | str | None = None) -> dict[str, Any] | None:
     if timestamp is not None:
         values: list[Any] = [timestamp]
@@ -100,7 +93,6 @@ def find_raw_frame(collection, md5: str, timestamp: int | str | None = None) -> 
         ]
     })
 
-
 def create_indexes(frame_collection, clip_collection) -> None:
     frame_collection.create_index(
         [("source.frame_collection", ASCENDING), ("source.frame_md5", ASCENDING), ("model.version", ASCENDING)],
@@ -114,7 +106,6 @@ def create_indexes(frame_collection, clip_collection) -> None:
     )
     clip_collection.create_index([("bag_name", ASCENDING)], name="bag_name")
 
-
 def resolve_raw(md5: str, kind: str) -> Path:
     exts = (".bin", ".pcd") if kind == "lidar" else (".jpg", ".jpeg", ".png")
     for root in RAW_ROOTS:
@@ -124,7 +115,6 @@ def resolve_raw(md5: str, kind: str) -> Path:
                 return path.resolve()
     raise FileNotFoundError(f"raw {kind} md5={md5} absent from allowed rawdata roots")
 
-
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -132,10 +122,8 @@ def sha256(path: Path) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
-
 def content_addressed_path(root: Path, digest: str, suffix: str) -> Path:
     return root / digest[:2] / digest[2:4] / f"{digest[4:]}{suffix}"
-
 
 def store(path: Path, asset_root: Path) -> dict:
     """Copy an immutable blob once and return its Mongo-safe reference."""
@@ -161,7 +149,6 @@ def store(path: Path, asset_root: Path) -> dict:
         "length": target.stat().st_size, "sha256": digest,
     }
 
-
 def upload_group(scene: Path, group: dict | None, asset_root: Path):
     if group is None:
         return None
@@ -178,7 +165,6 @@ def upload_group(scene: Path, group: dict | None, asset_root: Path):
         output[name].update(store(path, asset_root))
     return output
 
-
 def raw_cameras(raw: dict) -> list[dict]:
     sensors = ((raw.get("dependency") or {}).get("sensors") or {})
     output = []
@@ -192,7 +178,6 @@ def raw_cameras(raw: dict) -> list[dict]:
                 "uri": str(resolve_raw(md5, "camera")),
             })
     return output
-
 
 def run(
     *,
@@ -324,7 +309,6 @@ def run(
     print("content-addressed OCC store complete", flush=True)
     return 0
 
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--scene", required=True)
@@ -350,7 +334,6 @@ def main(argv: list[str] | None = None) -> int:
         resume=args.resume,
         write=args.write,
     )
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

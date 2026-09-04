@@ -86,13 +86,33 @@ sag = _load_static_agg()
 
 
 def _load_occupancy():
-    path = ROOT / "tools" / "robotruck_occupancy.py"
-    name = "robotruck_occupancy"
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
+    """Build API from tools/occ; render helpers from tools/occ_viewer."""
+    import types
+
+    occ_dir = ROOT / "tools" / "occ"
+    view_dir = ROOT / "tools" / "occ_viewer"
+    for d in (occ_dir, view_dir):
+        s = str(d)
+        if s not in sys.path:
+            sys.path.insert(0, s)
+    import occupancy as build
+    import occ_render as draw
+
+    mod = types.ModuleType("robotruck_occupancy")
+    for name in (
+        "OccupancyGrid",
+        "build_occupancy",
+    ):
+        setattr(mod, name, getattr(build, name))
+    for name in (
+        "render_occ_bev",
+        "render_occ_side_yz",
+        "render_occ_camera_view",
+        "occ_semantic_colors",
+        "occ_height_colors",
+        "occ_binary_colors",
+    ):
+        setattr(mod, name, getattr(draw, name))
     return mod
 
 

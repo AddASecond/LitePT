@@ -16,9 +16,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
-from paths import ROOT, ensure_import_path
-
-ensure_import_path()
+from _boot import ROOT  # noqa: F401
 from layer_scan import (  # noqa: E402
     CLIPS_COL,
     DB,

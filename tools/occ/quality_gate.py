@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
-
 def _pose_matrix(pose: dict) -> np.ndarray:
     q = pose["orientation"]
     x, y, z, w = map(float, (q["x"], q["y"], q["z"], q["w"]))
@@ -26,10 +25,8 @@ def _pose_matrix(pose: dict) -> np.ndarray:
     out[:3, 3] = [float(p["x"]), float(p["y"]), float(p["z"])]
     return out
 
-
 def _transform(xyz: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return (matrix[:3, :3] @ xyz.T).T + matrix[:3, 3]
-
 
 def _od_mask(xyz: np.ndarray, objects: list[dict], margin: float = 0.15) -> np.ndarray:
     mask = np.zeros(len(xyz), dtype=bool)
@@ -49,7 +46,6 @@ def _od_mask(xyz: np.ndarray, objects: list[dict], margin: float = 0.15) -> np.n
         )
     return mask
 
-
 def _load(clip_dir: Path, timestamp: str) -> tuple[np.ndarray, dict]:
     frame = clip_dir / "frames" / timestamp
     meta = json.loads((frame / "frame.json").read_text())
@@ -58,7 +54,6 @@ def _load(clip_dir: Path, timestamp: str) -> tuple[np.ndarray, dict]:
     if not deskew.get("md5"):
         raise ValueError(f"{timestamp}: lidar_merge_deskew metadata is missing")
     return points, meta
-
 
 def _lowest_cells(points: np.ndarray, lidar_id: int) -> dict[tuple[int, int], float]:
     keep = (
@@ -74,7 +69,6 @@ def _lowest_cells(points: np.ndarray, lidar_id: int) -> dict[tuple[int, int], fl
     order = np.lexsort((selected[:, 2], cells[:, 1], cells[:, 0]))
     unique, first = np.unique(cells[order], axis=0, return_index=True)
     return {tuple(cell): float(value) for cell, value in zip(unique, selected[order, 2][first])}
-
 
 def _layer_score(points: np.ndarray, min_overlap: int) -> dict:
     cells = {lid: _lowest_cells(points, lid) for lid in (1, 2, 14)}
@@ -97,7 +91,6 @@ def _layer_score(points: np.ndarray, min_overlap: int) -> dict:
         "pairwise": pairwise,
     }
 
-
 def _structural_map(points: np.ndarray, meta: dict, voxel: float, max_points: int) -> np.ndarray:
     xyz = points[:, :3]
     keep = (
@@ -118,7 +111,6 @@ def _structural_map(points: np.ndarray, meta: dict, voxel: float, max_points: in
         raise ValueError("dependency.ego_pose.pose is missing")
     return _transform(xyz.astype(np.float64), _pose_matrix(pose))
 
-
 def _trimmed_loss(tree: cKDTree, points: np.ndarray, max_distance: float) -> float:
     distance = tree.query(points, workers=-1)[0]
     distance = distance[distance < max_distance]
@@ -126,7 +118,6 @@ def _trimmed_loss(tree: cKDTree, points: np.ndarray, max_distance: float) -> flo
         return float("inf")
     count = max(100, int(0.7 * len(distance)))
     return float(np.median(np.partition(distance, count-1)[:count]))
-
 
 def assess_clip_geometry(
     clip_dir: Path,

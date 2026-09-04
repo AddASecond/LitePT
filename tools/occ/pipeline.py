@@ -15,11 +15,9 @@ from pymongo import MongoClient
 
 import store as STORE
 
-
 def json_write(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, default=str, ensure_ascii=False, indent=2))
-
 
 def pcd_binary_to_litept(source: Path, target: Path) -> None:
     """Convert binary PCD x/y/z/intensity/ring/timestamp/lidar_id to float32 Nx7."""
@@ -71,7 +69,6 @@ def pcd_binary_to_litept(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     output.tofile(target)
 
-
 def link_or_convert_lidar(source: Path, target: Path) -> None:
     if target.exists() or target.is_symlink():
         target.unlink()
@@ -82,7 +79,6 @@ def link_or_convert_lidar(source: Path, target: Path) -> None:
         pcd_binary_to_litept(source, target)
     else:
         raise ValueError(source)
-
 
 def materialize_raw_cache(db, frame_collection: str, clip_collection: str, clip_id: str, cache: Path) -> int:
     raw_clip = db[clip_collection].find_one({"clip_id": clip_id})
@@ -128,13 +124,11 @@ def materialize_raw_cache(db, frame_collection: str, clip_collection: str, clip_
     })
     return len(frames)
 
-
 def _export_scene(argv: list[str]) -> int:
-    from cuda_env import setup_cuda_env
+    from paths import setup_cuda_env
     setup_cuda_env()
     import export_scene
     return int(export_scene.main(argv) or 0)
-
 
 def run(
     *,
@@ -185,7 +179,6 @@ def run(
         write=write,
     )
 
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--raw-frame-collection", required=True)
@@ -217,7 +210,6 @@ def main(argv: list[str] | None = None) -> int:
         force_infer=args.force_infer,
         write=args.write,
     )
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

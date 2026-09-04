@@ -1,12 +1,4 @@
-"""Clip-level static lidar aggregation for Robotruck (ego_pose aligned).
-
-Static classes (and points not inside oracle track boxes) are transformed into
-the map frame via dependency.ego_pose, voxel-downsampled, and cached.
-
-Dynamic points stay per-frame. Oracle objects provide box-level track ids
-(center_imu + size) used only to exclude movers from the static pool — there
-is no dense point↔track association in the backup.
-"""
+"""Clip-level static lidar aggregation (ego_pose → map frame, voxel cache)."""
 from __future__ import annotations
 
 import hashlib
@@ -15,23 +7,10 @@ from pathlib import Path
 
 import numpy as np
 
-# Waymo-S LitePT indices (see visualize.WAYMO_NAMES)
-WAYMO_DYNAMIC_IDS = frozenset(
-    {
-        0,  # Car
-        1,  # Truck
-        2,  # Bus
-        3,  # Other Vehicle
-        4,  # Motorcyclist
-        5,  # Bicyclist
-        6,  # Pedestrian
-        11,  # Bicycle
-        12,  # Motorcycle
-    }
-)
+# Waymo-S LitePT indices (visualize.WAYMO_NAMES)
+WAYMO_DYNAMIC_IDS = frozenset({0, 1, 2, 3, 4, 5, 6, 11, 12})
 WAYMO_STATIC_IDS = frozenset(range(22)) - WAYMO_DYNAMIC_IDS
 WAYMO_GROUND_IDS = frozenset({17, 18, 19, 20, 21})
-
 
 
 def ground_aware_ego_keep_mask(xyz: np.ndarray, labels: np.ndarray, config: dict | None) -> tuple[np.ndarray, dict]:

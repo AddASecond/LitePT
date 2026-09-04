@@ -10,21 +10,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from paths import ROOT, ensure_import_path
-
-ensure_import_path()
-import store as STORE
+from _boot import ROOT, RAW_ROOTS, DEFAULT_URI  # noqa: F401
 
 LIST = ROOT / "exp/robotruck/pose_badcase/final_badcase_list.json"
 METRICS = ROOT / "exp/robotruck/pose_badcase/v2_metrics.json"
 CACHE = ROOT / "exp/robotruck/raw_volume_cache"
 OUTDIR = ROOT / "exp/robotruck/reject_triage_viz"
 
-MONGO_URI = STORE.DEFAULT_URI
+MONGO_URI = DEFAULT_URI
 DB = "perception_experiment"
 CLIPS_COL = "raw_data_clips_lidar14_0813"
 FRAMES_COL = "raw_data_frames_lidar14_0813"
-RAW_ROOTS = list(STORE.RAW_ROOTS)
 
 N_AGG = 30
 BEV_MARGIN_M = 25.0

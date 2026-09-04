@@ -12,17 +12,14 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from cuda_env import setup_cuda_env
-from paths import ROOT, ensure_import_path
+from paths import ROOT, ensure_import_path, setup_cuda_env, load_lidar_bin, LIDAR_COLS, ensure_preds
 
-setup_cuda_env()
+setup_cuda_env(warmup=False)
 ensure_import_path(tools=True, repo=True)
 
 import numpy as np
-import torch
 from PIL import Image
 
-import infer_robotruck_mongo_frame as _h
 import occupancy as occmod
 import quality_gate as qgate
 import static_agg as sag
@@ -41,7 +38,6 @@ CAM_ORDER = [
     "camera17",
 ]
 
-
 def list_clip_frames(clip_dir: Path) -> list[str]:
     idx_path = clip_dir / "frames_index.json"
     if idx_path.is_file():
@@ -52,7 +48,6 @@ def list_clip_frames(clip_dir: Path) -> list[str]:
         for p in sorted((clip_dir / "frames").iterdir())
         if (p / "lidar_merge.bin").is_file()
     ]
-
 
 def parse_camera(cam_doc: dict):
     # Defensive reshape: intrinsic / extrinsic may be stored as flat lists.
@@ -67,11 +62,9 @@ def parse_camera(cam_doc: dict):
     h = int(cam_doc["intrinsic"]["height"])
     return K, dist5, T_c_v, T_v_c, w, h
 
-
 def pose_stamp_ns(ego: dict) -> int:
     stamp = ego["header"]["stamp"]
     return int(stamp["sec"]) * 1_000_000_000 + int(stamp["nanosec"])
-
 
 def interpolate_pose_matrix(
     samples: list[tuple[int, dict]], timestamp_ns: int
@@ -101,18 +94,14 @@ def interpolate_pose_matrix(
     }
     return sag.ego_pose_to_T_map_vehicle(pose)
 
-
 def write_f32(path: Path, arr: np.ndarray) -> None:
     path.write_bytes(np.asarray(arr, dtype=np.float32).reshape(-1).tobytes())
-
 
 def write_u8(path: Path, arr: np.ndarray) -> None:
     path.write_bytes(np.asarray(arr, dtype=np.uint8).reshape(-1).tobytes())
 
-
 def write_i32(path: Path, arr: np.ndarray) -> None:
     path.write_bytes(np.asarray(arr, dtype=np.int32).reshape(-1).tobytes())
-
 
 def asset_ref(uri: str, dtype: str, shape: list) -> dict:
     return {
@@ -121,7 +110,6 @@ def asset_ref(uri: str, dtype: str, shape: list) -> dict:
         "shape": list(shape),
         "byte_order": "little",
     }
-
 
 def coarse_taxonomy() -> dict:
     # 0 dynamic, 1 static, 2 freespace, 3 noise
@@ -144,7 +132,6 @@ def coarse_taxonomy() -> dict:
         "fine_to_coarse": fine_to_coarse,
     }
 
-
 def export_frame(
     *,
     clip_id: str,
@@ -154,8 +141,6 @@ def export_frame(
     ts: str,
     pred_dir: Path,
     static_agg: dict | None,
-    model,
-    device,
     grid_size: float,
     reuse_pred: bool,
     x_range: tuple[float, float],
@@ -172,22 +157,21 @@ def export_frame(
     meta = json.loads((fr / "frame.json").read_text())
     sensors = meta["dependency"]["sensors"]
 
-    pts = _h.load_lidar_bin(fr / "lidar_merge.bin", num_cols=len(_h.LIDAR_COLS))
+    pts = load_lidar_bin(fr / "lidar_merge.bin")
     coord = pts[:, :3].astype(np.float32)
     lidar_ids = pts[:, 6].astype(np.int32)
     intensity = pts[:, 3]
-    strength = np.tanh(intensity.reshape(-1, 1) / 255.0).astype(np.float32)
 
     pred_path = pred_dir / f"{ts}_pred.npy"
-    if reuse_pred and pred_path.is_file():
-        pred = np.load(pred_path).astype(np.int64).reshape(-1)
-        if pred.shape[0] != coord.shape[0]:
-            pred = _h.infer_frame(model, coord, strength, device, grid_size)
-            np.save(pred_path, pred.astype(np.int32))
-    else:
-        pred = _h.infer_frame(model, coord, strength, device, grid_size)
-        pred_dir.mkdir(parents=True, exist_ok=True)
-        np.save(pred_path, pred.astype(np.int32))
+    if not pred_path.is_file():
+        raise FileNotFoundError(
+            f"missing pred {pred_path}; run A warmup CLI or export with ensure_preds"
+        )
+    pred = np.load(pred_path).astype(np.int64).reshape(-1)
+    if pred.shape[0] != coord.shape[0]:
+        raise ValueError(
+            f"pred length {pred.shape[0]} != lidar N {coord.shape[0]} for {ts}"
+        )
 
     # Preserve the complete current-frame deskew cloud for camera calibration
     # inspection. OCC ego/ROI/static aggregation filters must not affect it.
@@ -477,7 +461,6 @@ def export_frame(
         "path": str(out_frame),
     }
 
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--clip", default="")
@@ -541,7 +524,6 @@ def main(argv: list[str] | None = None) -> int:
             rc = max(rc, 1)
     return rc
 
-
 def export_one(args) -> int:
     clip_dir = (ROOT / args.backup_root / args.clip).resolve()
     if not clip_dir.is_dir():
@@ -589,9 +571,6 @@ def export_one(args) -> int:
     pred_dir.mkdir(parents=True, exist_ok=True)
     print(f"export clip={args.clip} frames={len(timestamps)}")
 
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    model, _ = _h.load_segmentor(ROOT / args.config_file, ROOT / args.weight, device)
-
     x_range = (-args.bev_x_half, args.bev_x_half)
     y_range = (args.bev_y_min, args.bev_y_max)
     z_range = (args.z_min, args.z_max)
@@ -605,6 +584,26 @@ def export_one(args) -> int:
         "method": "semantic_ground_robust_plane/v1",
     }
 
+    agg_ts = all_ts[:: max(1, args.agg_stride)] if args.aggregate_static else []
+    # B never loads the model: ensure preds via A CLI, then read npy only.
+    if not args.reuse_pred:
+        for ts in list(dict.fromkeys(list(timestamps) + list(agg_ts))):
+            pp = pred_dir / f"{ts}_pred.npy"
+            if pp.is_file():
+                pp.unlink()
+    ensure_preds(
+        clip_dir=clip_dir,
+        pred_dir=pred_dir,
+        timestamps=timestamps,
+        agg_timestamps=agg_ts,
+        stride=args.stride,
+        agg_stride=args.agg_stride,
+        max_frames=args.max_frames if args.max_frames > 0 else len(timestamps),
+        config_file=args.config_file,
+        weight=args.weight,
+        grid_size=args.grid_size,
+    )
+
     static_agg = None
     if args.aggregate_static:
         cache_path = (
@@ -614,38 +613,21 @@ def export_one(args) -> int:
             / "static_agg"
             / f"static_voxel{args.static_voxel:g}_s{args.agg_stride}.npz"
         )
-        agg_ts = all_ts[:: max(1, args.agg_stride)]
         static_agg = sag.load_or_build_static_aggregate(
             clip_dir,
             pred_dir,
             agg_ts,
-            load_lidar_bin=_h.load_lidar_bin,
-            lidar_cols=len(_h.LIDAR_COLS),
-            infer_frame=_h.infer_frame if not args.reuse_pred else None,
-            model=model,
-            device=device,
+            load_lidar_bin=load_lidar_bin,
+            lidar_cols=len(LIDAR_COLS),
+            infer_frame=None,
+            model=None,
+            device=None,
             grid_size=args.grid_size,
             voxel=args.static_voxel,
             cache_path=cache_path,
             use_oracle_boxes=True,
             ego_filter=ego_filter,
         )
-        if static_agg["xyz_map"].shape[0] == 0 and args.reuse_pred:
-            static_agg = sag.load_or_build_static_aggregate(
-                clip_dir,
-                pred_dir,
-                agg_ts,
-                load_lidar_bin=_h.load_lidar_bin,
-                lidar_cols=len(_h.LIDAR_COLS),
-                infer_frame=_h.infer_frame,
-                model=model,
-                device=device,
-                grid_size=args.grid_size,
-                voxel=args.static_voxel,
-                cache_path=cache_path,
-                use_oracle_boxes=True,
-                ego_filter=ego_filter,
-            )
         print(f"static_agg N={static_agg['xyz_map'].shape[0]}")
         # Mirror static_agg into the scene package (map frame; frames only apply pose).
         n_sa = int(static_agg["xyz_map"].shape[0])
@@ -728,8 +710,6 @@ def export_one(args) -> int:
             ts=ts,
             pred_dir=pred_dir,
             static_agg=static_agg,
-            model=model,
-            device=device,
             grid_size=args.grid_size,
             reuse_pred=args.reuse_pred,
             x_range=x_range,
@@ -757,7 +737,6 @@ def export_one(args) -> int:
     (scene_root / "index.json").write_text(json.dumps(index, indent=2))
     print(f"done -> {scene_root}  viewer: python tools/occ_viewer/serve.py --scene {scene_root}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

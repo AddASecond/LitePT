@@ -389,13 +389,13 @@ flowchart TB
 ```
 
 - **不重新推理**，只读场景包里的 occ / points / JPEG。  
-- 服务端调用：`tools/occ/scene_video.py`。
+- 服务端调用：`tools/occ_viewer/scene_video.py`。
 
 ### 10.3 命令行等价导出
 
 ```bash
 export PYTHONPATH=./
-.venv_smoke/bin/python tools/occ/scene_video.py \
+.venv_smoke/bin/python tools/occ_viewer/scene_video.py \
   --scene exp/robotruck/occ_scenes/stop_... \
   --mode occ --fps 5 --tile-w 960 --tile-h 540 \
   --max-frames 0

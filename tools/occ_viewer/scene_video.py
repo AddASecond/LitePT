@@ -3,16 +3,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from paths import ensure_import_path
+_VIEW = Path(__file__).resolve().parent
+if str(_VIEW) not in sys.path:
+    sys.path.insert(0, str(_VIEW))
 
-ensure_import_path()
-import occupancy as occmod
+from env_paths import ensure_c_path
+
+ensure_c_path()
+import occ_render as occmod
 
 
 def _read_f32(path: Path, n3: bool = True) -> np.ndarray:
@@ -482,7 +487,7 @@ def export_scene_video(
             )
             cam_panels.append(fit_panel(img, tile_w, tile_h))
 
-        bev = occmod.render_occ_bev(
+        bev = occ_render.render_occ_bev(
             grid,
             colors_bgr=colors_bgr,
             target_w=max(tile_w * 5, 2400),

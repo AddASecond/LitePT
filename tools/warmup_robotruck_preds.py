@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Infer: precompute preds for a materialized clip (agg-stride ∪ export-stride frames)."""
+"""A lane: precompute preds for a materialized clip (agg-stride ∪ export-stride).
+
+Contract: writes {pred_dir}/{ts}_pred.npy (int32, N = lidar points).
+See tools/occ/CONTRACTS.md. Production (B) must call this via CLI only.
+"""
 from __future__ import annotations
 
 import argparse
@@ -7,19 +11,34 @@ import json
 import sys
 from pathlib import Path
 
-from cuda_env import setup_cuda_env
-from paths import ROOT, ensure_import_path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
 
-ensure_import_path(tools=True)
-# fake mode must not touch CUDA; infer warms up via cuda_env
-_will_infer = "--mode" not in sys.argv or "--mode" in sys.argv and (
-    len(sys.argv) <= sys.argv.index("--mode") + 1
-    or sys.argv[sys.argv.index("--mode") + 1] == "infer"
-)
-setup_cuda_env(warmup=_will_infer)
 
-import numpy as np
-import infer_robotruck_mongo_frame as h
+def _setup_cuda_env() -> None:
+    import os
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ.pop("_CUDA_COMPAT_PATH", None)
+    os.environ.pop("Path", None)
+    ld = os.environ.get("LD_LIBRARY_PATH", "")
+    if "/usr/lib/x86_64-linux-gnu" not in ld.split(":"):
+        head = "/usr/lib/x86_64-linux-gnu"
+        cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
+        os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
+    os.environ["HAMI_DISABLE_WARN"] = "1"
+    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
+    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
+    try:
+        import torch
+
+        torch.cuda.is_available()
+    except Exception:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,17 +55,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--grid-size", type=float, default=0.05)
     ap.add_argument(
-        "--mode", choices=["infer", "fake"], default="infer",
+        "--mode",
+        choices=["infer", "fake"],
+        default="infer",
         help="fake: label everything class 7 (no CUDA)",
     )
     args = ap.parse_args(argv)
 
+    if args.mode == "infer":
+        _setup_cuda_env()
+
+    import numpy as np
+    import infer_robotruck_mongo_frame as h
+
     clip = Path(args.clip_dir)
     idx = json.loads((clip / "frames_index.json").read_text())
     tss = [str(e["timestamp"]) for e in idx if e.get("has_lidar")]
-    need = list(dict.fromkeys(
-        tss[::max(1, args.agg_stride)] + tss[::max(1, args.stride)][: args.max_frames]
-    ))
+    need = list(
+        dict.fromkeys(
+            tss[:: max(1, args.agg_stride)] + tss[:: max(1, args.stride)][: args.max_frames]
+        )
+    )
 
     pred_dir = Path(args.pred_dir)
     pred_dir.mkdir(parents=True, exist_ok=True)
