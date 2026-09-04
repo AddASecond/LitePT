@@ -10,41 +10,8 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
-def _pose_matrix(pose: dict) -> np.ndarray:
-    q = pose["orientation"]
-    x, y, z, w = map(float, (q["x"], q["y"], q["z"], q["w"]))
-    n = max(1e-12, np.sqrt(x*x + y*y + z*z + w*w))
-    x, y, z, w = x/n, y/n, z/n, w/n
-    out = np.eye(4)
-    out[:3, :3] = [
-        [1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
-        [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
-        [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)],
-    ]
-    p = pose["position"]
-    out[:3, 3] = [float(p["x"]), float(p["y"]), float(p["z"])]
-    return out
+import static_agg as sag
 
-def _transform(xyz: np.ndarray, matrix: np.ndarray) -> np.ndarray:
-    return (matrix[:3, :3] @ xyz.T).T + matrix[:3, 3]
-
-def _od_mask(xyz: np.ndarray, objects: list[dict], margin: float = 0.15) -> np.ndarray:
-    mask = np.zeros(len(xyz), dtype=bool)
-    for obj in objects:
-        box = obj.get("box_lidar")
-        if not isinstance(box, list) or len(box) < 7:
-            continue
-        x, y, z, length, width, height, yaw = map(float, box[:7])
-        delta = xyz - np.array([x, y, z])
-        c, s = np.cos(yaw), np.sin(yaw)
-        local_x = c*delta[:, 0] + s*delta[:, 1]
-        local_y = -s*delta[:, 0] + c*delta[:, 1]
-        mask |= (
-            (np.abs(local_x) <= length/2 + margin)
-            & (np.abs(local_y) <= width/2 + margin)
-            & (np.abs(delta[:, 2]) <= height/2 + margin)
-        )
-    return mask
 
 def _load(clip_dir: Path, timestamp: str) -> tuple[np.ndarray, dict]:
     frame = clip_dir / "frames" / timestamp
@@ -99,7 +66,7 @@ def _structural_map(points: np.ndarray, meta: dict, voxel: float, max_points: in
         & (xyz[:, 2] > -1.1) & (xyz[:, 2] < 4)
     )
     objects = (((meta.get("groundtruth") or {}).get("lidar_od_prelabel") or {}).get("objects") or [])
-    keep &= ~_od_mask(xyz, objects)
+    keep &= ~sag.points_in_lidar_od_prelabel_boxes(xyz, objects)
     xyz = xyz[keep]
     keys = np.floor(xyz / voxel).astype(np.int32)
     _, first = np.unique(keys, axis=0, return_index=True)
@@ -109,7 +76,7 @@ def _structural_map(points: np.ndarray, meta: dict, voxel: float, max_points: in
     pose = ((meta.get("dependency") or {}).get("ego_pose") or {}).get("pose")
     if not pose:
         raise ValueError("dependency.ego_pose.pose is missing")
-    return _transform(xyz.astype(np.float64), _pose_matrix(pose))
+    return sag.transform_points(xyz, sag.ego_pose_to_T_map_vehicle(pose)).astype(np.float64)
 
 def _trimmed_loss(tree: cKDTree, points: np.ndarray, max_distance: float) -> float:
     distance = tree.query(points, workers=-1)[0]
@@ -180,8 +147,8 @@ def assess_clip_geometry(
         next_points, next_meta = load_cached(timestamps[next_index])
         first_map = _structural_map(first_points, first_meta, 0.4, 8000)
         next_map = _structural_map(next_points, next_meta, 0.4, 8000)
-        p0 = _pose_matrix(first_meta["dependency"]["ego_pose"]["pose"])[:3, 3]
-        p1 = _pose_matrix(next_meta["dependency"]["ego_pose"]["pose"])[:3, 3]
+        p0 = sag.ego_pose_to_T_map_vehicle(first_meta["dependency"]["ego_pose"]["pose"])[:3, 3]
+        p1 = sag.ego_pose_to_T_map_vehicle(next_meta["dependency"]["ego_pose"]["pose"])[:3, 3]
         direction = p1 - p0
         direction /= max(1e-9, np.linalg.norm(direction))
         tree = cKDTree(first_map)

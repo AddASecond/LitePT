@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import argparse
 import copy
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Iterable
 
 from bson import BSON
 from pymongo import ASCENDING, MongoClient
 
 from paths import DEFAULT_URI
+from store import utc_now
 
 MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
 
 def collection_suffix(raw_collection: str, kind: str) -> str:
     prefix = f"raw_data_{kind}"

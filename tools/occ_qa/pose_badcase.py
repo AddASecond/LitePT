@@ -24,6 +24,7 @@ from layer_scan import (  # noqa: E402
     SUBSAMPLE,
     fetch_records,
     load_cloud,
+    pc_pair_metric,
 )
 
 OUT = ROOT / "exp/robotruck/pose_badcase"
@@ -185,17 +186,6 @@ def _ref_centers(kin: dict, anom: list[int]) -> list[int]:
     return out or cands[:N_REF]
 
 
-def _pc_pair_metric(pa: np.ndarray, pb: np.ndarray) -> float:
-    """Same as layer_scan.pc_pair_metric but workers=1 (safe under ProcessPool)."""
-    if len(pa) > SUBSAMPLE:
-        pa = pa[:: len(pa) // SUBSAMPLE]
-    if len(pb) > SUBSAMPLE:
-        pb = pb[:: len(pb) // SUBSAMPLE]
-    tree = cKDTree(pa)
-    d, _ = tree.query(pb, k=1, workers=1)
-    return float(np.percentile(d, 20))
-
-
 def _pair_cloud(cid: str, valid: list, a: int, b: int, cloud_cache: dict | None = None):
     fa, fb = valid[a][1], valid[b][1]
     if fa[2] is None or fb[2] is None or not fa[3] or not fb[3]:
@@ -218,7 +208,7 @@ def _pair_cloud(cid: str, valid: list, a: int, b: int, cloud_cache: dict | None 
         return None
     pa = A @ fa[2].T + fa[1]
     pb = B @ fb[2].T + fb[1]
-    return pa, pb, float(_pc_pair_metric(pa, pb)), fa[1], fb[1]
+    return pa, pb, float(pc_pair_metric(pa, pb, workers=1)), fa[1], fb[1]
 
 
 def _pose_shift(pa: np.ndarray, pb: np.ndarray, direction: np.ndarray):

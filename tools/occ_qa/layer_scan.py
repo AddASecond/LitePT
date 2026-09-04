@@ -53,7 +53,7 @@ def load_cloud(clip_uuid: str, ts: str, lidar_md5: str) -> np.ndarray:
     raise FileNotFoundError(f"no lidar payload ts={ts}")
 
 
-def pc_pair_metric(pa: np.ndarray, pb: np.ndarray) -> float:
+def pc_pair_metric(pa: np.ndarray, pb: np.ndarray, *, workers: int = -1) -> float:
     """两帧点云（已变换到 map 系）的跨帧对齐度: p20 of NN dist."""
     if len(pa) > SUBSAMPLE:
         pa = pa[:: len(pa) // SUBSAMPLE]
@@ -61,7 +61,7 @@ def pc_pair_metric(pa: np.ndarray, pb: np.ndarray) -> float:
         pb = pb[:: len(pb) // SUBSAMPLE]
     from scipy.spatial import cKDTree
     tree = cKDTree(pa)
-    d, _ = tree.query(pb, k=1, workers=-1)
+    d, _ = tree.query(pb, k=1, workers=workers)
     return float(np.percentile(d, 20))
 
 

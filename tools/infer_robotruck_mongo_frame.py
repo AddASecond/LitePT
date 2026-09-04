@@ -17,55 +17,12 @@ import sys
 from collections import OrderedDict
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
+from hami_cuda import setup_cuda_env
 
-def _setup_cuda_env() -> None:
-    """HAMI-vGPU container hardening: fix env BEFORE torch/spconv import.
-
-    Canonical rules (mirrors LitePT/.cuda_env.sh):
-      - nvidia0 node missing, only nvidia1 exists (CUDA enumerates it as 0):
-        CUDA_VISIBLE_DEVICES=0
-      - _CUDA_COMPAT_PATH forces old compat (575) against newer driver (580) -> remove
-      - Windows "Path" (capital P) leak must go
-      - prefer driver libcuda dirs in LD_LIBRARY_PATH
-      - FORCE EARLY CUDA INIT via torch before cv2/matplotlib or any other
-        CUDA-linked library can run cuInit first.  cv2 opencv-python-cuda
-        builds make hidden cuDeviceGetCount calls on import and, under HAMI
-        libvgpu.so, those are known to return error 304 intermittently and
-        then poison torch's subsequent cudaGetDeviceCount() call.  Grabbing
-        the CUDA session via torch first is the known-good pattern.
-    This is in plain Python (no shell) so it works via `python file.py`.
-    """
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    os.environ.pop("_CUDA_COMPAT_PATH", None)
-    os.environ.pop("Path", None)
-    ld = os.environ.get("LD_LIBRARY_PATH", "")
-    if "/usr/lib/x86_64-linux-gnu" not in ld.split(":"):
-        head = "/usr/lib/x86_64-linux-gnu"
-        cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
-        if ld:
-            os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}:{ld}"
-        else:
-            os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}"
-    # HAMI subprocess vgpu-alloc stability hints
-    os.environ["HAMI_DISABLE_WARN"] = "1"
-    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
-    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
-
-    # -- Immediate early init -- we import torch here precisely to be the
-    # first CUDA caller in the process, before cv2/matplotlib hit their own
-    # hidden CUDA probe calls (which would race against us on HAMI vGPU).
-    import torch as _torch
-    try:
-        if not _torch.cuda.is_available():
-            # Even if unavailable, record this cleanly so downstream failures
-            # are "no CUDA" rather than the misleading cudaGetDeviceCount 304.
-            pass
-    except Exception:
-        pass
-
-
-_setup_cuda_env()
+setup_cuda_env()
 
 
 import matplotlib
@@ -76,7 +33,6 @@ import numpy as np
 import torch
 from pymongo import MongoClient
 
-ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

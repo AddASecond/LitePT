@@ -16,107 +16,46 @@ from __future__ import annotations
 
 import argparse
 import bisect
-import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
+from hami_cuda import setup_cuda_env
 
-def _setup_cuda_env() -> None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    os.environ.pop("_CUDA_COMPAT_PATH", None)
-    os.environ.pop("Path", None)
-    ld = os.environ.get("LD_LIBRARY_PATH", "")
-    if "/usr/lib/x86_64-linux-gnu" not in ld.split(":"):
-        head = "/usr/lib/x86_64-linux-gnu"
-        cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
-        os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
-    os.environ["HAMI_DISABLE_WARN"] = "1"
-    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
-    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
-    # HAMI vGPU cuInit first-caller bugfix: torch must claim CUDA before cv2
-    # (opencv-python-cuda) hits its own hidden probe.
-    try:
-        import torch as _torch
-        _ = _torch.cuda.is_available()
-    except Exception:
-        pass
-
-
-_setup_cuda_env()
-
+setup_cuda_env()
 
 import cv2
 import numpy as np
 import torch
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-
-def _load_helpers():
-    path = ROOT / "tools" / "infer_robotruck_mongo_frame.py"
-    spec = importlib.util.spec_from_file_location("infer_robotruck_mongo_frame", path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_h = _load_helpers()
+import infer_robotruck_mongo_frame as _h
 from visualize import WAYMO_COLORS, WAYMO_NAMES  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "tools" / "occ"))
+sys.path.insert(0, str(ROOT / "tools" / "occ_viewer"))
+import occupancy as _occ_build
+import occ_render as _occ_draw
+import static_agg as sag
 
-def _load_static_agg():
-    path = ROOT / "tools" / "robotruck_static_agg.py"
-    name = "robotruck_static_agg"
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-sag = _load_static_agg()
-
-
-def _load_occupancy():
-    """Build API from tools/occ; render helpers from tools/occ_viewer."""
-    import types
-
-    occ_dir = ROOT / "tools" / "occ"
-    view_dir = ROOT / "tools" / "occ_viewer"
-    for d in (occ_dir, view_dir):
-        s = str(d)
-        if s not in sys.path:
-            sys.path.insert(0, s)
-    import occupancy as build
-    import occ_render as draw
-
-    mod = types.ModuleType("robotruck_occupancy")
-    for name in (
-        "OccupancyGrid",
-        "build_occupancy",
-    ):
-        setattr(mod, name, getattr(build, name))
-    for name in (
-        "render_occ_bev",
-        "render_occ_side_yz",
-        "render_occ_camera_view",
-        "occ_semantic_colors",
-        "occ_height_colors",
-        "occ_binary_colors",
-    ):
-        setattr(mod, name, getattr(draw, name))
-    return mod
+# Stitch build + render like the old robotruck_occupancy module.
+class _OccBundle:
+    OccupancyGrid = _occ_build.OccupancyGrid
+    build_occupancy = staticmethod(_occ_build.build_occupancy)
+    render_occ_bev = staticmethod(_occ_draw.render_occ_bev)
+    render_occ_side_yz = staticmethod(_occ_draw.render_occ_side_yz)
+    render_occ_camera_view = staticmethod(_occ_draw.render_occ_camera_view)
+    occ_semantic_colors = staticmethod(_occ_draw.occ_semantic_colors)
+    occ_height_colors = staticmethod(_occ_draw.occ_height_colors)
+    occ_binary_colors = staticmethod(_occ_draw.occ_binary_colors)
 
 
-occmod = _load_occupancy()
+occmod = _OccBundle()
 
 CAM_ORDER = [
     "camera1",
