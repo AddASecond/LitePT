@@ -15,9 +15,9 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
-from validate_raw_single_frame_projection import (  # noqa: E402
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from validate_projection import (  # noqa: E402
     read_binary_pcd, quat_to_rotation)
 
 BACKUP = ROOT / "exp/robotruck/raw_volume_cache"

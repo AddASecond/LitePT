@@ -22,8 +22,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 LIST = ROOT / "exp/robotruck/pose_badcase/final_badcase_list.json"
 METRICS = ROOT / "exp/robotruck/pose_badcase/v2_metrics.json"
@@ -55,8 +56,8 @@ def _load(name: str, path: Path):
     return mod
 
 
-ls = _load("layer_scan", ROOT / "tools/layer_scan.py")
-vrp = _load("vrp", ROOT / "tools/validate_raw_single_frame_projection.py")
+ls = _load("layer_scan", Path(__file__).with_name("layer_scan.py"))
+vrp = _load("vrp", Path(__file__).with_name("validate_projection.py"))
 
 
 def parse_camera(cam_doc: dict):

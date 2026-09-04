@@ -73,7 +73,7 @@ exp/robotruck/occ_scenes/
 ```bash
 cd /path/to/LitePT
 export PYTHONPATH=./
-.venv_smoke/bin/python tools/export_robotruck_occ_scene.py \
+.venv_smoke/bin/python tools/occ/export_scene.py \
   --clip stop_1784423032302844849_vehicle-V002-20260719_090818 \
   --stride 1 --reuse-pred --occ-voxel 0.2 \
   --export-points --aggregate-static
@@ -389,13 +389,13 @@ flowchart TB
 ```
 
 - **不重新推理**，只读场景包里的 occ / points / JPEG。  
-- 服务端调用：`tools/export_robotruck_scene_video.py`。
+- 服务端调用：`tools/occ/scene_video.py`。
 
 ### 10.3 命令行等价导出
 
 ```bash
 export PYTHONPATH=./
-.venv_smoke/bin/python tools/export_robotruck_scene_video.py \
+.venv_smoke/bin/python tools/occ/scene_video.py \
   --scene exp/robotruck/occ_scenes/stop_... \
   --mode occ --fps 5 --tile-w 960 --tile-h 540 \
   --max-frames 0
@@ -428,7 +428,7 @@ flowchart TB
 
 | 步骤 | 脚本 / 路径 |
 |------|-------------|
-| 导出场景 | `tools/export_robotruck_occ_scene.py` |
+| 导出场景 | `tools/occ/export_scene.py` |
 | 修空静态聚合 | `tools/repair_robotruck_scene_static.py --rewrite-occ` |
 | 看网页 | `tools/occ_viewer/serve.py` |
 | 导出视频 | 网页按钮或 `export_robotruck_scene_video.py` |

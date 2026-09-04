@@ -10,7 +10,7 @@ HAMI notes:
 
 Usage (from LitePT root):
   source .cuda_env.sh
-  .venv_smoke/bin/python tools/run_random10_inproc.py \\
+  .venv_smoke/bin/python tools/occ/run_inproc.py \\
       --clips-json /tmp/random10_clips.json \\
       --backup-root exp/robotruck/raw_volume_cache \\
       --scenes-root exp/robotruck/occ_scenes \\
@@ -26,7 +26,7 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 assert ROOT.name == "LitePT", "run from LitePT checkout; got: " + str(ROOT)
 
 
@@ -82,7 +82,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Import project modules (runs their module-level _setup_cuda_env).
     # Reuse modules already exec'd by export (same objects; avoid double import).
-    export_mod = load_mod("export_scene", "tools/export_robotruck_occ_scene.py")
+    export_mod = load_mod("export_scene", "tools/occ/export_scene.py")
     qgate = export_mod.qgate
     sag = export_mod.sag
     infer_mod = export_mod._h
@@ -90,7 +90,7 @@ def main() -> None:
     export_frame_fn = export_mod.export_frame
     pose_stamp_ns = export_mod.pose_stamp_ns
     load_segmentor = infer_mod.load_segmentor
-    store_mod = load_mod("store_gridfs", "tools/store_robotruck_occ_gridfs.py")
+    store_mod = load_mod("store_gridfs", "tools/occ/store.py")
 
     import torch
     gpu_ok = torch.cuda.is_available()
@@ -339,7 +339,7 @@ def main() -> None:
             try:
                 _sys_argv_save = sys.argv[:]
                 sys.argv = [
-                    "store_robotruck_occ_gridfs.py",
+                    "store.py",
                     "--scene", str(out_scene),
                     "--raw-frame-collection", args.raw_frame_collection,
                     "--raw-clip-collection", args.raw_clip_collection,

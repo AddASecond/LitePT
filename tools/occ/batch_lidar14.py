@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pymongo import MongoClient
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 TAGS = [
     "highway", "mountainous_winding_road", "bridge", "urban_street_scene",
     "interchange_ramp", "toll_station", "tunnel", "logistics_park",
@@ -35,7 +35,7 @@ def load_module(name: str, path: Path):
     return module
 
 
-GSS = load_module("lidar14_batch_gss", ROOT / "tools/gss_occ_mongo.py")
+GSS = load_module("lidar14_batch_gss", ROOT / "tools/occ/gss_mongo.py")
 
 
 def free_gib(db) -> float:
@@ -135,7 +135,7 @@ def main() -> int:
         print(f"[{number}/{len(clips)}] START tag={tag} clip={clip_id} free={available:.2f}GiB", flush=True)
         command = [
             str(ROOT / ".venv_smoke/bin/python"),
-            str(ROOT / "tools/run_robotruck_occ_mongo_pipeline.py"),
+            str(ROOT / "tools/occ/pipeline.py"),
             "--raw-frame-collection", "raw_data_frames_lidar14_0813",
             "--raw-clip-collection", "raw_data_clips_lidar14_0813",
             "--clip-id", clip_id,

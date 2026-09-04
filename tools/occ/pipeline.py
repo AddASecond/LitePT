@@ -48,8 +48,8 @@ _setup_cuda_env()
 import numpy as np
 from pymongo import MongoClient
 
-ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("occ_gridfs", ROOT / "tools/store_robotruck_occ_gridfs.py")
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location("occ_gridfs", ROOT / "tools/occ/store.py")
 STORE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(STORE)
@@ -188,11 +188,11 @@ def main() -> int:
     if args.force_infer or not (scene / "index.json").is_file():
         materialize_raw_cache(db, args.raw_frame_collection, raw_clip_collection, args.clip_id, cache)
         python = ROOT / ".venv_smoke/bin/python"
-        command = [str(python), str(ROOT / "tools/export_robotruck_occ_scene.py"), "--clip", scene_name, "--backup-root", args.cache_root, "--out-dir", args.scene_root, "--stride", str(args.stride), "--max-frames", str(args.max_frames), "--export-points", "--aggregate-static"]
+        command = [str(python), str(ROOT / "tools/occ/export_scene.py"), "--clip", scene_name, "--backup-root", args.cache_root, "--out-dir", args.scene_root, "--stride", str(args.stride), "--max-frames", str(args.max_frames), "--export-points", "--aggregate-static"]
         subprocess.run(command, cwd=ROOT, check=True)
     else:
         print(f"reuse existing inference scene: {scene}", flush=True)
-    store_command = [str(ROOT / ".venv_smoke/bin/python"), str(ROOT / "tools/store_robotruck_occ_gridfs.py"), "--scene", str(scene), "--raw-frame-collection", args.raw_frame_collection, "--raw-clip-collection", raw_clip_collection, "--backup-root", args.cache_root, "--asset-root", args.asset_root]
+    store_command = [str(ROOT / ".venv_smoke/bin/python"), str(ROOT / "tools/occ/store.py"), "--scene", str(scene), "--raw-frame-collection", args.raw_frame_collection, "--raw-clip-collection", raw_clip_collection, "--backup-root", args.cache_root, "--asset-root", args.asset_root]
     if args.write:
         store_command.append("--write")
     subprocess.run(store_command, cwd=ROOT, check=True)

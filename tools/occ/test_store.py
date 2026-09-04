@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 
-MODULE = Path(__file__).with_name("store_robotruck_occ_gridfs.py")
+MODULE = Path(__file__).with_name("store.py")
 SPEC = importlib.util.spec_from_file_location("occ_content_store_tested", MODULE)
 STORE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

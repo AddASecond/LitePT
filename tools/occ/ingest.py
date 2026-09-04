@@ -8,13 +8,13 @@ contain validated URIs plus dtype/shape metadata.
 
 Dry-run (default)::
 
-    python tools/ingest_robotruck_occ_mongo.py \
+    python tools/occ/ingest.py \
       --scene exp/robotruck/occ_scenes/stop_... \
       --raw-frame-collection raw_data_frames_braking_matrix
 
 Write idempotently after reviewing the dry-run summary::
 
-    python tools/ingest_robotruck_occ_mongo.py ... --write
+    python tools/occ/ingest.py ... --write
 """
 from __future__ import annotations
 

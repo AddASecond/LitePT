@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
 VIEWER_DIR = Path(__file__).resolve().parent
-EXPORT_SCRIPT = ROOT / "tools" / "export_robotruck_scene_video.py"
+EXPORT_SCRIPT = ROOT / "tools" / "occ" / "scene_video.py"
 
 
 class VideoJob:

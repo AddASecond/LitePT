@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).with_name("gss_occ_mongo.py")
+MODULE_PATH = Path(__file__).with_name("gss_mongo.py")
 SPEC = importlib.util.spec_from_file_location("gss_occ_mongo_tested", MODULE_PATH)
 GSS = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

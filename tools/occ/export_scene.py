@@ -8,7 +8,7 @@ Separates data production from visualization:
 
 Usage:
   export PYTHONPATH=./
-  .venv_smoke/bin/python tools/export_robotruck_occ_scene.py \\
+  .venv_smoke/bin/python tools/occ/export_scene.py \\
     --clip stop_1784423032302844849_vehicle-V002-20260719_090818 \\
     --stride 2 --max-frames 3 --reuse-pred --occ-voxel 0.2 --export-points
 """
@@ -57,7 +57,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -73,9 +73,9 @@ def _load(name: str, rel: str):
 
 
 _h = _load("infer_robotruck_mongo_frame", "tools/infer_robotruck_mongo_frame.py")
-sag = _load("robotruck_static_agg", "tools/robotruck_static_agg.py")
-qgate = _load("robotruck_quality_gate", "tools/robotruck_quality_gate.py")
-occmod = _load("robotruck_occupancy", "tools/robotruck_occupancy.py")
+sag = _load("robotruck_static_agg", "tools/occ/static_agg.py")
+qgate = _load("robotruck_quality_gate", "tools/occ/quality_gate.py")
+occmod = _load("robotruck_occupancy", "tools/occ/occupancy.py")
 vis = _load("visualize_mod", "visualize.py")
 
 CAM_ORDER = [
