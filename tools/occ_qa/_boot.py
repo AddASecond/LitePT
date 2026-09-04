@@ -1,16 +1,17 @@
-"""Bootstrap C lane (occ_qa). Do not put tools/occ on sys.path."""
+"""Bootstrap occ_qa (no LitePT occ production imports; no occ_viewer dependency)."""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 QA = Path(__file__).resolve().parent
-VIEWER = QA.parent / "occ_viewer"
-for path in (QA, VIEWER):
-    s = str(path)
-    if s not in sys.path:
-        sys.path.insert(0, s)
+ROOT = QA.parents[1]
+RAW_ROOTS = tuple(Path(f"/data/rawdata{s}") for s in ("", "-1", "-2", "-3", "-4"))
+DEFAULT_URI = os.environ.get(
+    "ROBOTRUCK_MONGO_URI",
+    "mongodb://krk030-mongodb:27017/?authSource=perception_experiment",
+)
 
-from env_paths import ROOT, RAW_ROOTS, DEFAULT_URI, ensure_c_path  # noqa: E402
-
-ensure_c_path(QA)
+if str(QA) not in sys.path:
+    sys.path.insert(0, str(QA))

@@ -696,7 +696,7 @@ def export_one(args) -> int:
         "frames": [],
         "clip": args.clip,
         "occ_voxel": args.occ_voxel,
-        "viewer_hint": "python tools/occ_viewer/serve.py --scene " + str(scene_root),
+        "viewer_hint": "cd /home/dev/01develop/occ_viewer && python serve.py --scene " + str(scene_root),
     }
     if index_static_agg is not None:
         index["static_agg"] = index_static_agg
@@ -735,7 +735,7 @@ def export_one(args) -> int:
         print(f"  [{i+1}/{len(timestamps)}] ts={ts} n_occ={info['n_occ']}", flush=True)
 
     (scene_root / "index.json").write_text(json.dumps(index, indent=2))
-    print(f"done -> {scene_root}  viewer: python tools/occ_viewer/serve.py --scene {scene_root}")
+    print(f"done -> {scene_root}  viewer: cd /home/dev/01develop/occ_viewer && python serve.py --scene {scene_root}")
     return 0
 
 if __name__ == "__main__":

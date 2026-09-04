@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -38,7 +39,9 @@ import infer_robotruck_mongo_frame as _h
 from visualize import WAYMO_COLORS, WAYMO_NAMES  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tools" / "occ"))
-sys.path.insert(0, str(ROOT / "tools" / "occ_viewer"))
+_viewer = Path(os.environ.get("OCC_VIEWER_ROOT", "/home/dev/01develop/occ_viewer"))
+if _viewer.is_dir():
+    sys.path.insert(0, str(_viewer))
 import occupancy as _occ_build
 import occ_render as _occ_draw
 import static_agg as sag
@@ -697,7 +700,7 @@ def main() -> int:
         "--cam-occ-side",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Place projected occ beside each camera (looks sparse; prefer tools/occ_viewer)",
+        help="Place projected occ beside each camera (sparse; prefer standalone occ_viewer)",
     )
     ap.add_argument(
         "--occ-voxel",
