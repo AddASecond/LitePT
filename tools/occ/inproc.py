@@ -1,36 +1,23 @@
 #!/usr/bin/env python3
-"""In-process OCC export+store runner (HAMI-safe single CUDA process).
+"""In-process multi-clip OCC export+store (one CUDA process; HAMI-safe).
 
-Production quality: each clip runs robotruck_quality_gate before OCC export
-(same gate as export_robotruck_occ_scene). Rejected clips are skipped.
-
-HAMI notes:
-  * source LitePT/.cuda_env.sh before launching Python
-  * keep all CUDA work in this one interpreter (no CUDA subprocesses)
-
-Usage (from LitePT root):
-  source .cuda_env.sh
-  python tools/occ/inproc.py \\
-      --clips-json /tmp/random10_clips.json \\
-      --backup-root exp/robotruck/raw_volume_cache \\
-      --scenes-root exp/robotruck/occ_scenes \\
-      --asset-root exp/robotruck/occ_assets \\
-      --stride 5 [--dry-run] [--max-frames-per-clip 60]
+Each clip: quality_gate → export_frame loop → store.run. Defaults differ from
+export_scene CLI (ego box / occ_min_points) — do not merge the two runners.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+from paths import ROOT, ensure_import_path
+
 assert ROOT.name == "LitePT", "run from LitePT checkout; got: " + str(ROOT)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--clips-json", required=True, type=Path)
     ap.add_argument("--backup-root", required=True, type=Path)
     ap.add_argument("--scenes-root", required=True, type=Path)
@@ -46,16 +33,14 @@ def main() -> None:
     ap.add_argument("--max-export-points", type=int, default=65536)
     ap.add_argument("--raw-frame-collection", default="raw_data_frames_lidar14_0813")
     ap.add_argument("--raw-clip-collection", default="raw_data_clips_lidar14_0813")
-    ap.add_argument("--write-store", action="store_true", default=True,
-                    help="write assets + mongo doc (default True).")
-    ap.add_argument("--no-write-store", dest="write_store", action="store_false",
-                    help="disable store step (useful for smoke tests).")
+    ap.add_argument("--write-store", action="store_true", default=True)
+    ap.add_argument("--no-write-store", dest="write_store", action="store_false")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
         "--geometry-quality-gate",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="reject clips that fail robotruck_quality_gate (default: on)",
+        help="reject clips that fail quality_gate (default: on)",
     )
     ap.add_argument("--quality-sample-frames", type=int, default=5)
     ap.add_argument("--layer-threshold", type=float, default=None)
@@ -69,11 +54,7 @@ def main() -> None:
     print(f"[plan] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
           f"_CUDA_COMPAT_PATH={os.environ.get('_CUDA_COMPAT_PATH')}")
 
-    _OCC = Path(__file__).resolve().parent
-    if str(_OCC) not in sys.path:
-        sys.path.insert(0, str(_OCC))
-    if str(ROOT / "tools") not in sys.path:
-        sys.path.insert(0, str(ROOT / "tools"))
+    ensure_import_path(tools=True)
     import export_scene as export_mod
     import store as store_mod
     qgate = export_mod.qgate
@@ -325,33 +306,24 @@ def main() -> None:
         (out_scene / "index.json").write_text(json.dumps(index_doc))
         print(f"  wrote index.json -> {out_scene}")
 
-        # ---- store (call store main() via sys.argv override) ----
+        # ---- store ----
         rc_store = 0
         if args.write_store:
             try:
-                _sys_argv_save = sys.argv[:]
-                sys.argv = [
-                    "store.py",
-                    "--scene", str(out_scene),
-                    "--raw-frame-collection", args.raw_frame_collection,
-                    "--raw-clip-collection", args.raw_clip_collection,
-                    "--asset-root", str(Path(args.asset_root).resolve()),
-                    # backup_root must be ABSOLUTE directory ending in /scene_name's parent
-                    # so store can find <backup>/<scene>/frames/<ts>/frame.json
-                    "--backup-root", str(Path(args.backup_root).resolve()),
-                    "--write",
-                ]
-                ret = store_mod.main()
-                sys.argv[:] = _sys_argv_save
-                rc_store = int(ret or 0)
-                print(f"  store main() rc={rc_store}")
+                rc_store = int(store_mod.run(
+                    scene=out_scene,
+                    raw_frame_collection=args.raw_frame_collection,
+                    raw_clip_collection=args.raw_clip_collection,
+                    asset_root=Path(args.asset_root).resolve(),
+                    backup_root=Path(args.backup_root).resolve(),
+                    write=True,
+                ) or 0)
+                print(f"  store.run rc={rc_store}")
             except Exception as e:
                 import traceback
                 traceback.print_exc()
                 print(f"  STORE FAIL: {e}")
                 rc_store = 99
-                try: sys.argv[:] = _sys_argv_save
-                except Exception: pass
 
         status.append({"i": i, "clip_id": clip_id, "tag": tag,
                        "frames": len(frame_paths), "rc": rc_store})

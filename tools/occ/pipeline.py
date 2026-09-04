@@ -1,37 +1,22 @@
 #!/usr/bin/env python3
-"""Run raw-volume LitePT inference, then index content-addressed OCC in MongoDB."""
+"""Materialize raw clip cache → export_scene → store (one clip)."""
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
-import struct
-import sys
 from pathlib import Path
 
 from cuda_env import setup_cuda_env
+from paths import ROOT, ensure_import_path
 
 setup_cuda_env()
+ensure_import_path()
 
 import numpy as np
 from pymongo import MongoClient
 
-ROOT = Path(__file__).resolve().parents[2]
-_OCC = Path(__file__).resolve().parent
-if str(_OCC) not in sys.path:
-    sys.path.insert(0, str(_OCC))
-
 import export_scene
 import store as STORE
-
-
-def _call_main(module, argv: list[str]) -> int:
-    old = sys.argv[:]
-    try:
-        sys.argv = [getattr(module, "__file__", module.__name__), *argv]
-        return int(module.main() or 0)
-    finally:
-        sys.argv = old
 
 
 def json_write(path: Path, value) -> None:
@@ -131,16 +116,73 @@ def materialize_raw_cache(db, frame_collection: str, clip_collection: str, clip_
             target.symlink_to(camera)
             copied_cameras[name] = target.name
         json_write(frame_dir / "frame.json", raw)
-        index.append({"timestamp": raw["timestamp"], "md5": md5, "has_lidar": True, "n_cameras": len(copied_cameras), "copied": {"lidar_merge": "lidar_merge.bin", "cameras": copied_cameras}})
+        index.append({
+            "timestamp": raw["timestamp"], "md5": md5, "has_lidar": True,
+            "n_cameras": len(copied_cameras),
+            "copied": {"lidar_merge": "lidar_merge.bin", "cameras": copied_cameras},
+        })
         if number % 50 == 0 or number == len(frames):
             print(f"materialized raw {number}/{len(frames)}", flush=True)
     json_write(cache / "clip.json", raw_clip)
     json_write(cache / "frames_index.json", index)
-    json_write(cache / "SUMMARY.json", {"clip_id": clip_id, "mongo_frame_count": len(frames), "raw_roots": [str(p) for p in STORE.RAW_ROOTS]})
+    json_write(cache / "SUMMARY.json", {
+        "clip_id": clip_id, "mongo_frame_count": len(frames),
+        "raw_roots": [str(p) for p in STORE.RAW_ROOTS],
+    })
     return len(frames)
 
 
-def main() -> int:
+def run(
+    *,
+    raw_frame_collection: str,
+    clip_id: str,
+    raw_clip_collection: str = "",
+    scene_name: str = "",
+    database: str = "perception_experiment",
+    mongo_uri: str = STORE.DEFAULT_URI,
+    cache_root: str = "exp/robotruck/raw_volume_cache",
+    scene_root: str = "exp/robotruck/occ_scenes",
+    asset_root: str = "/data/rawdata-4/occupancy",
+    stride: int = 1,
+    max_frames: int = 0,
+    force_infer: bool = False,
+    write: bool = False,
+) -> int:
+    raw_clip_collection = raw_clip_collection or STORE.infer_collection(
+        raw_frame_collection, "frames", "clips"
+    )
+    scene_name = scene_name or f"mongo_{raw_frame_collection}_{clip_id}"
+    cache = (ROOT / cache_root / scene_name).resolve()
+    scene = (ROOT / scene_root / scene_name).resolve()
+    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
+    client.admin.command("ping")
+    db = client[database]
+    if force_infer or not (scene / "index.json").is_file():
+        materialize_raw_cache(db, raw_frame_collection, raw_clip_collection, clip_id, cache)
+        rc = export_scene.main([
+            "--clip", scene_name,
+            "--backup-root", cache_root,
+            "--out-dir", scene_root,
+            "--stride", str(stride),
+            "--max-frames", str(max_frames),
+            "--export-points",
+            "--aggregate-static",
+        ])
+        if rc:
+            return rc
+    else:
+        print(f"reuse existing inference scene: {scene}", flush=True)
+    return STORE.run(
+        scene=scene,
+        raw_frame_collection=raw_frame_collection,
+        raw_clip_collection=raw_clip_collection,
+        backup_root=cache_root,
+        asset_root=asset_root,
+        write=write,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--raw-frame-collection", required=True)
     ap.add_argument("--raw-clip-collection", default="")
@@ -155,39 +197,22 @@ def main() -> int:
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--force-infer", action="store_true")
     ap.add_argument("--write", action="store_true")
-    args = ap.parse_args()
-    raw_clip_collection = args.raw_clip_collection or STORE.infer_collection(args.raw_frame_collection, "frames", "clips")
-    scene_name = args.scene_name or f"mongo_{args.raw_frame_collection}_{args.clip_id}"
-    cache = (ROOT / args.cache_root / scene_name).resolve()
-    scene = (ROOT / args.scene_root / scene_name).resolve()
-    client = MongoClient(args.mongo_uri, serverSelectionTimeoutMS=10000)
-    client.admin.command("ping")
-    db = client[args.database]
-    if args.force_infer or not (scene / "index.json").is_file():
-        materialize_raw_cache(db, args.raw_frame_collection, raw_clip_collection, args.clip_id, cache)
-        rc = _call_main(export_scene, [
-            "--clip", scene_name,
-            "--backup-root", args.cache_root,
-            "--out-dir", args.scene_root,
-            "--stride", str(args.stride),
-            "--max-frames", str(args.max_frames),
-            "--export-points",
-            "--aggregate-static",
-        ])
-        if rc:
-            return rc
-    else:
-        print(f"reuse existing inference scene: {scene}", flush=True)
-    store_argv = [
-        "--scene", str(scene),
-        "--raw-frame-collection", args.raw_frame_collection,
-        "--raw-clip-collection", raw_clip_collection,
-        "--backup-root", args.cache_root,
-        "--asset-root", args.asset_root,
-    ]
-    if args.write:
-        store_argv.append("--write")
-    return _call_main(STORE, store_argv)
+    args = ap.parse_args(argv)
+    return run(
+        raw_frame_collection=args.raw_frame_collection,
+        raw_clip_collection=args.raw_clip_collection,
+        clip_id=args.clip_id,
+        scene_name=args.scene_name,
+        database=args.database,
+        mongo_uri=args.mongo_uri,
+        cache_root=args.cache_root,
+        scene_root=args.scene_root,
+        asset_root=args.asset_root,
+        stride=args.stride,
+        max_frames=args.max_frames,
+        force_infer=args.force_infer,
+        write=args.write,
+    )
 
 
 if __name__ == "__main__":

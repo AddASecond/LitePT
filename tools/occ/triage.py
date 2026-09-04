@@ -1,43 +1,30 @@
 #!/usr/bin/env python3
-"""REJECT triage 可视化：BEV（框出可疑区）+ 多相机投影。
-
-解决「斜视图看不出问题 / 文字对不上图」：
-  1. BEV 聚合（帧序着色 → 鬼影显彩虹分层）
-  2. 红色方框标出轨迹/点云可疑区域 + 锚点十字
-  3. 锚点帧 lidar→相机投影（错位/分层在图像上更直观）
-  4. 完整 bag_name + clip_id + 中英文说明
-
-输出: exp/robotruck/reject_triage_viz/
-"""
+"""REJECT triage viz: BEV ghosting + camera projections → exp/robotruck/reject_triage_viz/."""
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import sys
 import textwrap
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from paths import ROOT, ensure_import_path
+
+ensure_import_path()
+import store as STORE
 
 LIST = ROOT / "exp/robotruck/pose_badcase/final_badcase_list.json"
 METRICS = ROOT / "exp/robotruck/pose_badcase/v2_metrics.json"
 CACHE = ROOT / "exp/robotruck/raw_volume_cache"
 OUTDIR = ROOT / "exp/robotruck/reject_triage_viz"
 
-MONGO_URI = os.environ.get(
-    "ROBOTRUCK_MONGO_URI",
-    "mongodb://krk030-mongodb:27017/?authSource=perception_experiment",
-)
+MONGO_URI = STORE.DEFAULT_URI
 DB = "perception_experiment"
 CLIPS_COL = "raw_data_clips_lidar14_0813"
 FRAMES_COL = "raw_data_frames_lidar14_0813"
-RAW_ROOTS = [Path(f"/data/rawdata{s}") for s in ("", "-1", "-2", "-3", "-4")]
+RAW_ROOTS = list(STORE.RAW_ROOTS)
 
 N_AGG = 30
 BEV_MARGIN_M = 25.0
@@ -46,7 +33,6 @@ SUB_PER_FRAME = 15000
 CAM_PANEL_W, CAM_PANEL_H = 640, 360
 CAM_ORDER = ["camera1", "camera2", "camera5", "camera6", "camera7", "camera8"]
 HEADER_H = 220
-
 
 import layer_scan as ls
 import validate_projection as vrp

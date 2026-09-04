@@ -1,16 +1,6 @@
-"""Export Robotruck frame packages for the occ frontend viewer.
+"""Export OCC scene packages (cameras + voxels + optional points) for the viewer.
 
-Separates data production from visualization:
-  - clean camera JPGs (no point overlay)
-  - 0.1m occupancy voxels (centers + labels)
-  - optional point cloud for toggle in the viewer
-  - camera intrinsics/extrinsics + ego_pose
-
-Usage:
-  export PYTHONPATH=./
-  .venv_smoke/bin/python tools/occ/export_scene.py \\
-    --clip stop_1784423032302844849_vehicle-V002-20260719_090818 \\
-    --stride 2 --max-frames 3 --reuse-pred --occ-voxel 0.2 --export-points
+python tools/occ/export_scene.py --clip <name> --stride 2 --max-frames 3 --reuse-pred --export-points
 """
 from __future__ import annotations
 
@@ -19,23 +9,18 @@ import bisect
 import json
 import os
 import shutil
-import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-
 from cuda_env import setup_cuda_env
+from paths import ROOT, ensure_import_path
 
 setup_cuda_env()
+ensure_import_path(tools=True, repo=True)
 
 import numpy as np
 import torch
 from PIL import Image
-
-ROOT = Path(__file__).resolve().parents[2]
-_OCC = Path(__file__).resolve().parent
-for path in (ROOT, _OCC, ROOT / "tools"):
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
 
 import infer_robotruck_mongo_frame as _h
 import occupancy as occmod
@@ -493,7 +478,7 @@ def export_frame(
     }
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--clip",
@@ -534,7 +519,7 @@ def main() -> int:
     ap.add_argument("--ego-y-range", type=float, nargs=2, default=(-1.0, 2.5))
     ap.add_argument("--ego-min-height", type=float, default=0.35)
     ap.add_argument("--ego-max-height", type=float, default=4.0)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     clip_dir = (ROOT / args.backup_root / args.clip).resolve()
     if not clip_dir.is_dir():
@@ -676,8 +661,6 @@ def main() -> int:
     else:
         index_static_agg = None
 
-    from datetime import datetime, timezone
-
     index = {
         "schema_version": "robotruck_occ_scene/v1",
         "scene_id": args.clip,
@@ -750,18 +733,7 @@ def main() -> int:
         print(f"  [{i+1}/{len(timestamps)}] ts={ts} n_occ={info['n_occ']}", flush=True)
 
     (scene_root / "index.json").write_text(json.dumps(index, indent=2))
-    schema_src = ROOT / "tools" / "occ_viewer" / "SCHEMA.md"
-    if schema_src.is_file():
-        shutil.copy2(schema_src, scene_root / "SCHEMA.md")
-    (scene_root / "README.txt").write_text(
-        "Robotruck occ scene package (schema robotruck_occ_scene/v1).\n"
-        "See SCHEMA.md for Mongo-ready asset URIs.\n\n"
-        "Open viewer:\n"
-        f"  cd {ROOT}\n"
-        f"  .venv_smoke/bin/python tools/occ_viewer/serve.py --scene {scene_root}\n"
-        "  http://127.0.0.1:8765/?scene=/scene\n"
-    )
-    print(f"done -> {scene_root}")
+    print(f"done -> {scene_root}  viewer: python tools/occ_viewer/serve.py --scene {scene_root}")
     return 0
 
 

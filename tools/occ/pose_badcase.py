@@ -1,27 +1,13 @@
 #!/usr/bin/env python3
-"""Pose / 点云分层 badcase 扫描（离线数据集 QA，不进 OCC export 主路径）。
+"""Offline pose/PC layering QA (not delivery SoT — that is quality_gate.py).
 
-交付拒收以 tools/occ/quality_gate.py（export 默认开启）为准。
-本脚本用于全库扫描 + 人工 triage（配合 tools/occ/triage_viz.py）：
-  1) 运动学：轨迹是否车辆可实现 → feasible / n_infeas
-  2) 选诡异窗 + 参考窗，算点云对齐：maxA / medA / ratio / gpc
-  3) 必要时做 pose-shift：shift / rel / cons
-  4) 仅用 5 个可调阈值判定 REJECT / HIGH / WARN / CLEAN
-
-五条可调参数（人能理解）：
-  T_MED       多窗口中位对齐误差（是否「持续」差）
-  T_GPC       全局对齐误差（整段是否发虚）
-  T_MAX       局部最差对齐误差（是否「尖」得够狠）
-  T_NINF      运动学不可达帧数（轨迹是否乱）
-  T_DRIFT_REL pose 平移搜索的相对改善（系统性漂移）
-
-输出: exp/robotruck/pose_badcase/{v2_metrics.json, final_badcase_list.json, ...}
+Five tunables: T_MED / T_GPC / T_MAX / T_NINF / T_DRIFT_REL → REJECT/HIGH/WARN/CLEAN.
+Viz: tools/occ/triage.py. Out: exp/robotruck/pose_badcase/
 """
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -29,8 +15,9 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from paths import ROOT, ensure_import_path
+
+ensure_import_path()
 from layer_scan import (  # noqa: E402
     CLIPS_COL,
     DB,

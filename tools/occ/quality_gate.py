@@ -1,8 +1,6 @@
-"""Clip-level geometry quality gate for OCC delivery.
+"""Clip-level geometry quality gate for OCC delivery (export_scene / inproc SoT).
 
-Used by export_robotruck_occ_scene (default ON) and run_random10_inproc.
-Rejects clips with corroborated multi-lidar height layering or high-confidence
-pose-alignment failure. This is the single source of truth for production reject.
+Rejects corroborated multi-lidar height layering or high-confidence pose-alignment failure.
 """
 from __future__ import annotations
 

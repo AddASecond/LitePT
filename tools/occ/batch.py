@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Run stride-sampled LitePT OCC clips in round-robin tag order."""
+"""Round-robin tag batch: pipeline(stride=5) → GSS publish. Production manifest for lidar14_0813."""
 from __future__ import annotations
 
 import argparse
-import os
-import sys
 import traceback
 from datetime import datetime, timezone
-from pathlib import Path
 
 from pymongo import MongoClient
 
-ROOT = Path(__file__).resolve().parents[2]
+from paths import ensure_import_path
+
+ensure_import_path(repo=True)
+
+import gss_mongo as GSS
+import pipeline as PIPELINE
+import store as STORE
+
 TAGS = [
     "highway", "mountainous_winding_road", "bridge", "urban_street_scene",
     "interchange_ramp", "toll_station", "tunnel", "logistics_park",
@@ -24,25 +28,13 @@ TAGS = [
 ]
 
 
-_OCC = Path(__file__).resolve().parent
-if str(_OCC) not in sys.path:
-    sys.path.insert(0, str(_OCC))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-import gss_mongo as GSS
-import pipeline as PIPELINE
-
-
 def free_gib(db) -> float:
     stats = db.command({"dbStats": 1, "scale": 1})
     return (stats.get("fsTotalSize", 0) - stats.get("fsUsedSize", 0)) / 1024**3
 
 
 def ordered_clips(collection) -> list[tuple[str, dict]]:
-    by_tag = {
-        tag: list(collection.find({"tag": tag}).sort("clip_id", 1)) for tag in TAGS
-    }
+    by_tag = {tag: list(collection.find({"tag": tag}).sort("clip_id", 1)) for tag in TAGS}
     output: list[tuple[str, dict]] = []
     for index in range(max(map(len, by_tag.values()))):
         for tag in TAGS:
@@ -58,11 +50,10 @@ def publish_gss(db, raw_clip: dict, tag: str, version: str) -> None:
     }).sort("timestamp", 1))
     if not frames:
         raise RuntimeError(f"no OCC frames stored for clip_id={clip_id}")
-    run_id = f"litept-s5-0813-{clip_id}-v1"
     document = GSS.build_gss_document(
         tag=tag,
         version=version,
-        run_id=run_id,
+        run_id=f"litept-s5-0813-{clip_id}-v1",
         clips=[GSS.build_gss_clip(raw_clip, frames)],
         producer={
             "name": "LitePT",
@@ -90,18 +81,15 @@ def record_failure(db, *, clip_id: str, tag: str, stage: str, error: Exception) 
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--mongo-uri", default=os.environ.get(
-        "ROBOTRUCK_MONGO_URI",
-        "mongodb://krk030-mongodb:27017/?authSource=perception_experiment",
-    ))
+    ap.add_argument("--mongo-uri", default=STORE.DEFAULT_URI)
     ap.add_argument("--database", default="perception_experiment")
     ap.add_argument("--stride", type=int, default=5)
     ap.add_argument("--min-free-gib", type=float, default=15.0)
     ap.add_argument("--max-clips", type=int, default=0)
     ap.add_argument("--dataset-version", default="lidar14-0813-occ-s5-v1")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if args.stride != 5:
         raise ValueError("this production manifest is fixed to stride=5")
 
@@ -129,19 +117,15 @@ def main() -> int:
             return 0
         scene_name = f"batch_s5_{clip_id}"
         print(f"[{number}/{len(clips)}] START tag={tag} clip={clip_id} free={available:.2f}GiB", flush=True)
-        argv = [
-            "--raw-frame-collection", "raw_data_frames_lidar14_0813",
-            "--raw-clip-collection", "raw_data_clips_lidar14_0813",
-            "--clip-id", clip_id,
-            "--scene-name", scene_name,
-            "--stride", str(args.stride),
-            "--write",
-        ]
         try:
-            old_argv = sys.argv[:]
-            sys.argv = [PIPELINE.__file__, *argv]
-            rc = int(PIPELINE.main() or 0)
-            sys.argv = old_argv
+            rc = PIPELINE.run(
+                raw_frame_collection="raw_data_frames_lidar14_0813",
+                raw_clip_collection="raw_data_clips_lidar14_0813",
+                clip_id=clip_id,
+                scene_name=scene_name,
+                stride=args.stride,
+                write=True,
+            )
             if rc:
                 raise RuntimeError(f"pipeline rc={rc}")
         except Exception as error:

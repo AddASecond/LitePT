@@ -1,34 +1,17 @@
-"""Export an MP4 from an already-exported occ scene package.
-
-No re-inference: reads cameras + occupancy (+ optional points) from the scene
-dir produced by tools/occ/export_scene.py, composites multi-cam
-panels with scale-correct occ/point projections and a BEV occupancy strip.
-
-Usage:
-  export PYTHONPATH=./
-  .venv_smoke/bin/python tools/occ/scene_video.py \\
-    --scene exp/robotruck/occ_scenes/stop_... \\
-    --mode occ --fps 5 --tile-w 960 --tile-h 540
-"""
+"""Export MP4 from an existing OCC scene package (no re-inference)."""
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from paths import ensure_import_path
 
-
-_OCC = Path(__file__).resolve().parent
-if str(_OCC) not in sys.path:
-    sys.path.insert(0, str(_OCC))
+ensure_import_path()
 import occupancy as occmod
 
 

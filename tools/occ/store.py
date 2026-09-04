@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Store OCC metadata in MongoDB and arrays as content-addressed files.
-
-Raw blobs are accepted only from /data/rawdata and /data/rawdata-1..-4.
-The scene directory is an inference cache, never a raw-data source.
-"""
+"""Write OCC scene packages into Mongo + content-addressed files under /data/rawdata*."""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +13,7 @@ from typing import Any
 
 from pymongo import ASCENDING, MongoClient
 
-ROOT = Path(__file__).resolve().parents[2]
+from paths import ROOT
 RAW_ROOTS = tuple(Path(f"/data/rawdata{s}") for s in ("", "-1", "-2", "-3", "-4"))
 DEFAULT_ASSET_ROOT = Path("/data/rawdata-4/occupancy")
 DEFAULT_URI = os.environ.get(
@@ -204,30 +200,30 @@ def raw_cameras(raw: dict) -> list[dict]:
     return output
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--scene", required=True)
-    ap.add_argument("--raw-frame-collection", required=True)
-    ap.add_argument("--raw-clip-collection", default="")
-    ap.add_argument("--database", default="perception_experiment")
-    ap.add_argument("--mongo-uri", default=DEFAULT_URI)
-    ap.add_argument("--asset-root", type=Path, default=DEFAULT_ASSET_ROOT)
-    ap.add_argument("--model-version", default="v1")
-    ap.add_argument("--backup-root", default="data/robotruck_clips_backup")
-    ap.add_argument("--resume", action="store_true", help="Skip frames already stored as v2")
-    ap.add_argument("--write", action="store_true")
-    args = ap.parse_args()
-
-    scene = Path(args.scene).resolve()
+def run(
+    *,
+    scene: str | Path,
+    raw_frame_collection: str,
+    raw_clip_collection: str = "",
+    database: str = "perception_experiment",
+    mongo_uri: str = DEFAULT_URI,
+    asset_root: str | Path = DEFAULT_ASSET_ROOT,
+    model_version: str = "v1",
+    backup_root: str | Path = "data/robotruck_clips_backup",
+    resume: bool = False,
+    write: bool = False,
+) -> int:
+    scene = Path(scene).resolve()
+    asset_root = Path(asset_root)
     index = load_json(scene / "index.json")
-    raw_clip_name = args.raw_clip_collection or infer_collection(args.raw_frame_collection, "frames", "clips")
-    occ_frame_name = infer_occ_collection(args.raw_frame_collection)
+    raw_clip_name = raw_clip_collection or infer_collection(raw_frame_collection, "frames", "clips")
+    occ_frame_name = infer_occ_collection(raw_frame_collection)
     occ_clip_name = infer_occ_collection(raw_clip_name)
-    backup = (ROOT / args.backup_root / scene.name).resolve()
-    client = MongoClient(args.mongo_uri, serverSelectionTimeoutMS=10000)
+    backup = (ROOT / backup_root / scene.name).resolve()
+    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
     client.admin.command("ping")
-    db = client[args.database]
-    raw_frames, raw_clips = db[args.raw_frame_collection], db[raw_clip_name]
+    db = client[database]
+    raw_frames, raw_clips = db[raw_frame_collection], db[raw_clip_name]
     occ_frames, occ_clips = db[occ_frame_name], db[occ_clip_name]
 
     prepared, clip_ids = [], set()
@@ -251,13 +247,13 @@ def main() -> int:
         raise RuntimeError(f"raw clip {clip_id} absent from {raw_clip_name}")
 
     print(json.dumps({
-        "mode": "write-content-addressed" if args.write else "dry-run", "scene": str(scene),
+        "mode": "write-content-addressed" if write else "dry-run", "scene": str(scene),
         "frames": len(prepared), "raw_roots": [str(p) for p in RAW_ROOTS],
-        "raw": {"frames": args.raw_frame_collection, "clips": raw_clip_name, "clip_id": clip_id},
+        "raw": {"frames": raw_frame_collection, "clips": raw_clip_name, "clip_id": clip_id},
         "occ": {"frames": occ_frame_name, "clips": occ_clip_name,
-                "asset_root": str(args.asset_root.resolve())},
+                "asset_root": str(asset_root.resolve())},
     }, default=str, indent=2), flush=True)
-    if not args.write:
+    if not write:
         return 0
 
     create_indexes(occ_frames, occ_clips)
@@ -265,23 +261,23 @@ def main() -> int:
     for number, (entry, raw, meta, lidar_path, cameras) in enumerate(prepared, 1):
         md5 = raw_lidar_md5(raw) or raw["md5"]
         identity = {
-            "source.frame_collection": args.raw_frame_collection,
+            "source.frame_collection": raw_frame_collection,
             "source.frame_md5": md5,
-            "model.version": args.model_version,
+            "model.version": model_version,
         }
-        if args.resume and occ_frames.find_one(
+        if resume and occ_frames.find_one(
             {**identity, "schema_version": "litept_occ_frame/v2"}, {"_id": 1}
         ):
             continue
         source = {
-            "db": args.database, "frame_collection": args.raw_frame_collection,
+            "db": database, "frame_collection": raw_frame_collection,
             "clip_collection": raw_clip_name, "raw_id": str(raw.get("_id")),
             "frame_md5": md5, "clip_id": clip_id,
         }
         current = meta.get("assets") or {}
         assets = {
-            "occupancy": upload_group(scene, current.get("occupancy"), args.asset_root),
-            "points": upload_group(scene, current.get("points"), args.asset_root),
+            "occupancy": upload_group(scene, current.get("occupancy"), asset_root),
+            "points": upload_group(scene, current.get("points"), asset_root),
             "cameras": cameras,
         }
         doc = {
@@ -291,7 +287,7 @@ def main() -> int:
             "tag": sorted(set((raw.get("tag") or []) + ["litept", "occ", "semseg"])),
             "source": source,
             "raw_assets": {"lidar_merge": {"md5": md5, "uri": str(lidar_path)}, "cameras": cameras},
-            "model": {"name": "litept-small-waymo-semseg", "version": args.model_version, "taxonomy": "waymo-22"},
+            "model": {"name": "litept-small-waymo-semseg", "version": model_version, "taxonomy": "waymo-22"},
             "coordinate": meta.get("coordinate"), "grid": meta.get("grid"), "stats": meta.get("stats"),
             "assets": assets, "ego_pose": ((raw.get("dependency") or {}).get("ego_pose")),
             "provenance": {
@@ -307,7 +303,7 @@ def main() -> int:
         if number % 10 == 0 or number == len(prepared):
             print(f"uploaded {number}/{len(prepared)}", flush=True)
 
-    static = upload_group(scene, index.get("static_agg"), args.asset_root)
+    static = upload_group(scene, index.get("static_agg"), asset_root)
     timestamps = [raw.get("timestamp") for _, raw, _, _, _ in prepared]
     clip_doc = {
         "schema_version": "litept_occ_clip/v2", "clip_id": clip_id,
@@ -315,24 +311,51 @@ def main() -> int:
         "bag_path": raw_clip.get("bag_path"),
         "tag": sorted(set((raw_clip.get("tag") or []) + ["litept", "occ"])),
         "source": {
-            "db": args.database, "clip_collection": raw_clip_name,
-            "frame_collection": args.raw_frame_collection,
+            "db": database, "clip_collection": raw_clip_name,
+            "frame_collection": raw_frame_collection,
             "raw_id": str(raw_clip.get("_id")), "clip_id": clip_id,
         },
         "frame_collection": occ_frame_name, "frame_count": len(prepared),
         "start_timestamp": min(timestamps), "end_timestamp": max(timestamps),
-        "model": {"name": "litept-small-waymo-semseg", "version": args.model_version, "taxonomy": "waymo-22"},
+        "model": {"name": "litept-small-waymo-semseg", "version": model_version, "taxonomy": "waymo-22"},
         "static_agg": static, "taxonomy": index.get("taxonomy"), "defaults": index.get("defaults"),
         "geometry_quality": index.get("geometry_quality", index.get("pose_quality")),
         "status": {"state": "complete", "processed_frames": len(prepared), "failed_frames": 0},
         "updated_at": now,
     }
     occ_clips.update_one(
-        {"source.clip_collection": raw_clip_name, "source.clip_id": clip_id, "model.version": args.model_version},
+        {"source.clip_collection": raw_clip_name, "source.clip_id": clip_id, "model.version": model_version},
         {"$set": clip_doc, "$setOnInsert": {"created_at": now}}, upsert=True,
     )
-    print("content-addressed OCC ingest complete", flush=True)
+    print("content-addressed OCC store complete", flush=True)
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--scene", required=True)
+    ap.add_argument("--raw-frame-collection", required=True)
+    ap.add_argument("--raw-clip-collection", default="")
+    ap.add_argument("--database", default="perception_experiment")
+    ap.add_argument("--mongo-uri", default=DEFAULT_URI)
+    ap.add_argument("--asset-root", type=Path, default=DEFAULT_ASSET_ROOT)
+    ap.add_argument("--model-version", default="v1")
+    ap.add_argument("--backup-root", default="data/robotruck_clips_backup")
+    ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--write", action="store_true")
+    args = ap.parse_args(argv)
+    return run(
+        scene=args.scene,
+        raw_frame_collection=args.raw_frame_collection,
+        raw_clip_collection=args.raw_clip_collection,
+        database=args.database,
+        mongo_uri=args.mongo_uri,
+        asset_root=args.asset_root,
+        model_version=args.model_version,
+        backup_root=args.backup_root,
+        resume=args.resume,
+        write=args.write,
+    )
 
 
 if __name__ == "__main__":

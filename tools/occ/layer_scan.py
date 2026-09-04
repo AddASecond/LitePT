@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
-"""全量 clip 点云分层扫描（离线辅助；交付拒收请用 robotruck_quality_gate）。
+"""Offline PC layer helpers + scan for pose_badcase (global_pc_p20 / mongo loaders).
 
-为 pose_badcase_v2 提供 global_pc_p20（layer_metrics.json）及 mongo/点云加载工具。
-主入口仍是 pose_badcase_v2 + reject_triage_viz。
+Delivery reject SoT is quality_gate.py, not this file.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from paths import ROOT, ensure_import_path
+
+ensure_import_path()
+import store as STORE
 from validate_projection import (  # noqa: E402
     read_binary_pcd, quat_to_rotation)
 
 BACKUP = ROOT / "exp/robotruck/raw_volume_cache"
 OUT = ROOT / "exp/robotruck/pose_badcase"
-RAW_ROOTS = [Path(f"/data/rawdata{s}") for s in ("", "-1", "-2", "-3", "-4")]
+RAW_ROOTS = list(STORE.RAW_ROOTS)
 
-MONGO_URI = os.environ.get("ROBOTRUCK_MONGO_URI",
-                           "mongodb://krk030-mongodb:27017/?authSource=perception_experiment")
+MONGO_URI = STORE.DEFAULT_URI
 DB = "perception_experiment"
 FRAMES_COL = "raw_data_frames_lidar14_0813"
 CLIPS_COL = "raw_data_clips_lidar14_0813"

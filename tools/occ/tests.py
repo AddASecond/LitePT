@@ -2,16 +2,14 @@
 """OCC unit tests."""
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-_OCC = Path(__file__).resolve().parent
-if str(_OCC) not in sys.path:
-    sys.path.insert(0, str(_OCC))
+from paths import ensure_import_path
 
+ensure_import_path()
 import gss_mongo as GSS
 import store as STORE
 
