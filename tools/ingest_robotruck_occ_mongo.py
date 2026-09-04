@@ -78,8 +78,11 @@ def md5_from_backup(scene_frame: dict[str, Any], backup_root: Path | None) -> st
         return None
     raw = load_json(frame_json)
     sensors = ((raw.get("dependency") or {}).get("sensors") or {})
-    lidar_md5 = ((sensors.get("lidar_merge") or {}).get("md5"))
-    for value in (raw.get("md5"), lidar_md5):
+    lidar_md5s = [
+        ((sensors.get(name) or {}).get("md5"))
+        for name in ("lidar_merge_deskew", "lidar_merge", "lidar_merge_nodeskew")
+    ]
+    for value in (*lidar_md5s, raw.get("md5")):
         if isinstance(value, str) and MD5_RE.fullmatch(value):
             return value.lower()
     return None
@@ -130,8 +133,14 @@ def rewrite_asset_tree(
 
 def raw_lidar_md5(raw: dict[str, Any]) -> str | None:
     sensors = ((raw.get("dependency") or {}).get("sensors") or {})
-    value = ((sensors.get("lidar_merge") or {}).get("md5"))
-    return value.lower() if isinstance(value, str) and MD5_RE.fullmatch(value) else None
+    # The 0813 production collection contains both the original merged cloud
+    # and an ego/object deskewed derivative.  Prefer deskew for OCC, while
+    # retaining compatibility with older collections and names.
+    for name in ("lidar_merge_deskew", "lidar_merge", "lidar_merge_nodeskew"):
+        value = ((sensors.get(name) or {}).get("md5"))
+        if isinstance(value, str) and MD5_RE.fullmatch(value):
+            return value.lower()
+    return None
 
 
 def raw_camera_refs(raw: dict[str, Any], rawdata_root: str) -> list[dict[str, Any]]:
@@ -313,12 +322,32 @@ def build_clip_document(
     }
 
 
-def find_raw_frame(collection, md5: str) -> dict[str, Any] | None:
+def find_raw_frame(
+    collection, md5: str, timestamp: int | str | None = None
+) -> dict[str, Any] | None:
+    # Timestamp is indexed in the production frame collections and is the
+    # preferred lookup for derived deskew assets whose MD5 path is not indexed.
+    if timestamp is not None:
+        values: list[Any] = [timestamp]
+        try:
+            numeric = int(timestamp)
+            if numeric != timestamp:
+                values.append(numeric)
+        except (TypeError, ValueError):
+            pass
+        raw = collection.find_one({"timestamp": {"$in": values}})
+        if raw is not None and md5 in {
+            raw.get("md5"), raw_lidar_md5(raw),
+            ((((raw.get("dependency") or {}).get("sensors") or {}).get("lidar_merge_nodeskew") or {}).get("md5")),
+        }:
+            return raw
     return collection.find_one(
         {
             "$or": [
                 {"md5": md5},
                 {"dependency.sensors.lidar_merge.md5": md5},
+                {"dependency.sensors.lidar_merge_deskew.md5": md5},
+                {"dependency.sensors.lidar_merge_nodeskew.md5": md5},
             ]
         }
     )

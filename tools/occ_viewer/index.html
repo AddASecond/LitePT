@@ -51,6 +51,8 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     label.ctrl { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); white-space: nowrap; }
+    label.ctrl input[type="range"] { width: 112px; min-width: 80px; cursor: pointer; }
+    .range-value { min-width: 34px; color: var(--text); font-variant-numeric: tabular-nums; }
     select, button {
       background: #222833; color: var(--text); border: 1px solid var(--border);
       border-radius: 6px; padding: 6px 10px;
@@ -165,11 +167,15 @@
         <label class="ctrl">Frame
           <select id="frameSelect"></select>
         </label>
+        <label class="ctrl">OCC Algorithm
+          <select id="occVariant"><option value="litept">LitePT dynamic</option></select>
+        </label>
         <button type="button" id="btnPrevFrame" title="Previous frame (←)">◀ Prev</button>
         <button type="button" id="btnNextFrame" title="Next frame (→)">Next ▶</button>
         <span class="hint" id="framePos">—</span>
         <label class="ctrl"><input type="checkbox" id="togOcc" checked /> Occupancy</label>
         <label class="ctrl"><input type="checkbox" id="togPts" checked /> Points</label>
+        <label class="ctrl"><input type="checkbox" id="togOdBoxes" checked /> OD BBox + ID</label>
         <label class="ctrl"><input type="checkbox" id="togGrid" checked /> Ground grid</label>
         <label class="ctrl"><input type="checkbox" id="togAxes" checked /> Axes</label>
         <button id="btnFit">Reset 3D view</button>
@@ -306,20 +312,48 @@
             <label class="ctrl">Project
               <select id="projMode">
                 <option value="none">RGB only</option>
-                <option value="occ" selected>Occupancy</option>
-                <option value="points">Points</option>
+                <option value="occ">Occupancy</option>
+                <option value="points" selected>Points</option>
                 <option value="both">Occ + Points</option>
               </select>
             </label>
             <label class="ctrl" title="Overlay opacity on photo">Alpha
-              <input type="range" id="projAlpha" min="0.1" max="0.85" step="0.05" value="0.4" />
+              <input type="range" id="projAlpha" min="0.05" max="0.85" step="0.05" value="0.7" />
+              <span class="range-value" id="projAlphaValue">0.7</span>
             </label>
-            <label class="ctrl" title="Min point size in image pixels">Pt px
-              <input type="range" id="projRadius" min="1" max="3" step="1" value="1" />
+            <label class="ctrl" title="Projected point square size in source-image pixels">Pt px
+              <input type="range" id="projRadius" min="1" max="12" step="1" value="4" />
+              <span class="range-value" id="projRadiusValue">4 px</span>
+            </label>
+            <label class="ctrl">Point color
+              <select id="projColorMode">
+                <option value="height" selected>Height</option>
+                <option value="semantic">Semantic/Lidar</option>
+              </select>
+            </label>
+            <label class="ctrl">Point filter
+              <select id="projClassFilter">
+                <option value="all" selected>All classes</option>
+                <option value="10">Cone only (label 10)</option>
+              </select>
+            </label>
+            <label class="ctrl" title="Vehicle-frame z range mapped across the full height color ramp">Height z
+              <input type="number" id="projHeightMin" min="-10" max="10" step="0.1" value="-2.2" style="width:58px" />
+              <span>to</span>
+              <input type="number" id="projHeightMax" min="-10" max="10" step="0.1" value="0.5" style="width:58px" />
+            </label>
+            <label class="ctrl">Point source
+              <select id="projPointSource">
+                <option value="frame" selected>Current frame (deskew)</option>
+                <option value="aggregate">Clip aggregate</option>
+              </select>
+            </label>
+            <label class="ctrl" title="Apply the camera radtan coefficients stored with this raw JPEG">
+              <input type="checkbox" id="projDistortion" checked /> Apply calibrated distortion
             </label>
             <button type="button" id="btnRefreshProj">Refresh projection</button>
           </div>
-          <div class="hint">RGB underlay · occ = voxel cubes (8 corners) · click to enlarge</div>
+          <div class="hint">High-contrast discrete height bands, default z=-2.2…0.5 m for cones/road objects; values above range saturate red</div>
         </div>
         <div id="cams"></div>
       </section>
@@ -346,6 +380,6 @@
     }
   }
   </script>
-  <script type="module" src="./app.js?v=occ-fix-14"></script>
+  <script type="module" src="./app.js?v=occ-fix-29"></script>
 </body>
 </html>

@@ -15,11 +15,43 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import bisect
 import importlib.util
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
+
+
+def _setup_cuda_env() -> None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ.pop("_CUDA_COMPAT_PATH", None)
+    os.environ.pop("Path", None)
+    ld = os.environ.get("LD_LIBRARY_PATH", "")
+    if "/usr/lib/x86_64-linux-gnu" not in ld.split(":"):
+        head = "/usr/lib/x86_64-linux-gnu"
+        cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
+        os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
+    os.environ["HAMI_DISABLE_WARN"] = "1"
+    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
+    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
+    # CUDA init order bugfix under HAMI libvgpu.so: the first library that
+    # calls cuInit wins the vGPU-initialisation race.  cv2 / matplotlib (Qt)
+    # have their own CUDA probes and, under HAMI, occasionally return 304 on
+    # the first call which poisons torch's later init.  Initialise via torch
+    # NOW, before either numpy/cv2/matplotlib or any child import grabs it.
+    if os.environ.get("LITEPT_SKIP_CUDA_WARMUP") != "1":
+        import torch as _torch
+        try:
+            _ok = _torch.cuda.is_available()
+        except Exception:
+            pass
+
+
+_setup_cuda_env()
+
 
 import numpy as np
 import torch
@@ -42,6 +74,7 @@ def _load(name: str, rel: str):
 
 _h = _load("infer_robotruck_mongo_frame", "tools/infer_robotruck_mongo_frame.py")
 sag = _load("robotruck_static_agg", "tools/robotruck_static_agg.py")
+qgate = _load("robotruck_quality_gate", "tools/robotruck_quality_gate.py")
 occmod = _load("robotruck_occupancy", "tools/robotruck_occupancy.py")
 vis = _load("visualize_mod", "visualize.py")
 
@@ -72,15 +105,51 @@ def list_clip_frames(clip_dir: Path) -> list[str]:
 
 
 def parse_camera(cam_doc: dict):
-    K = np.asarray(cam_doc["intrinsic"]["intrinsic"], dtype=np.float64)
+    # Defensive reshape: intrinsic / extrinsic may be stored as flat lists.
+    K = np.asarray(cam_doc["intrinsic"]["intrinsic"], dtype=np.float64).reshape(3, 3)
     dist = np.asarray(cam_doc["intrinsic"]["distortion"], dtype=np.float64).reshape(-1)
     dist5 = np.zeros(5, dtype=np.float64)
     dist5[: min(5, dist.size)] = dist[:5]
-    T_v_c = np.asarray(cam_doc["extrinsic"]["transformation"], dtype=np.float64)
+    # T_v_c = camera pose in vehicle (p_veh = T_v_c · p_cam).
+    T_v_c = np.asarray(cam_doc["extrinsic"]["transformation"], dtype=np.float64).reshape(4, 4)
     T_c_v = np.linalg.inv(T_v_c)
     w = int(cam_doc["intrinsic"]["width"])
     h = int(cam_doc["intrinsic"]["height"])
     return K, dist5, T_c_v, T_v_c, w, h
+
+
+def pose_stamp_ns(ego: dict) -> int:
+    stamp = ego["header"]["stamp"]
+    return int(stamp["sec"]) * 1_000_000_000 + int(stamp["nanosec"])
+
+
+def interpolate_pose_matrix(
+    samples: list[tuple[int, dict]], timestamp_ns: int
+) -> np.ndarray:
+    times = [row[0] for row in samples]
+    hi = bisect.bisect_left(times, int(timestamp_ns))
+    if hi <= 0:
+        return sag.ego_pose_to_T_map_vehicle(samples[0][1])
+    if hi >= len(samples):
+        return sag.ego_pose_to_T_map_vehicle(samples[-1][1])
+    ta, pa = samples[hi - 1]
+    tb, pb = samples[hi]
+    alpha = float(timestamp_ns - ta) / float(tb - ta)
+    qa = np.array([pa["orientation"][k] for k in ("x", "y", "z", "w")], np.float64)
+    qb = np.array([pb["orientation"][k] for k in ("x", "y", "z", "w")], np.float64)
+    if np.dot(qa, qb) < 0:
+        qb = -qb
+    q = (1.0 - alpha) * qa + alpha * qb
+    q /= np.linalg.norm(q)
+    pose = {
+        "position": {
+            k: (1.0 - alpha) * float(pa["position"][k])
+            + alpha * float(pb["position"][k])
+            for k in ("x", "y", "z")
+        },
+        "orientation": dict(zip(("x", "y", "z", "w"), q.tolist())),
+    }
+    return sag.ego_pose_to_T_map_vehicle(pose)
 
 
 def write_f32(path: Path, arr: np.ndarray) -> None:
@@ -146,6 +215,8 @@ def export_frame(
     occ_min_points: int,
     export_points: bool,
     max_export_points: int,
+    ego_filter: dict | None,
+    pose_samples: list[tuple[int, dict]],
 ) -> dict:
     fr = clip_dir / "frames" / ts
     meta = json.loads((fr / "frame.json").read_text())
@@ -167,6 +238,15 @@ def export_frame(
         pred = _h.infer_frame(model, coord, strength, device, grid_size)
         pred_dir.mkdir(parents=True, exist_ok=True)
         np.save(pred_path, pred.astype(np.int32))
+
+    # Preserve the complete current-frame deskew cloud for camera calibration
+    # inspection. OCC ego/ROI/static aggregation filters must not affect it.
+    frame_sensor_xyz = coord.copy()
+    frame_sensor_labels = pred.astype(np.int32, copy=True)
+    frame_sensor_lidar_ids = lidar_ids.copy()
+
+    ego_keep, ego_filter_stats = sag.ground_aware_ego_keep_mask(coord, pred, ego_filter)
+    coord, pred, lidar_ids = coord[ego_keep], pred[ego_keep], lidar_ids[ego_keep]
 
     lab_s = np.zeros((0,), np.int32)
     lid_s = np.zeros((0,), np.int32)
@@ -205,18 +285,31 @@ def export_frame(
     cam_dir.mkdir(exist_ok=True)
 
     cameras_meta = []
+    lidar_timestamp = int(
+        (sensors.get("lidar_merge_deskew") or {}).get("timestamp") or ts
+    )
+    T_map_v_lidar = interpolate_pose_matrix(pose_samples, lidar_timestamp)
     for cam_name in CAM_ORDER:
         img_path = fr / f"{cam_name}.jpg"
         if not img_path.is_file() or cam_name not in sensors:
             continue
         cam_doc = sensors[cam_name]
         K, dist5, T_c_v, T_v_c, cal_w, cal_h = parse_camera(cam_doc)
+        camera_timestamp = int(cam_doc.get("timestamp") or lidar_timestamp)
+        T_map_v_camera = interpolate_pose_matrix(pose_samples, camera_timestamp)
+        T_c_v_lidar_ref = T_c_v @ np.linalg.inv(T_map_v_camera) @ T_map_v_lidar
+        # Camera corruption must not invalidate a LiDAR OCC frame.  Verify the
+        # source before copying and omit only the unreadable camera asset.
+        try:
+            with Image.open(img_path) as im:
+                iw, ih = im.size
+                im.verify()
+        except (OSError, ValueError) as error:
+            print(f"  [camera-skip] ts={ts} camera={cam_name}: {error}", flush=True)
+            continue
         # clean image copy (no overlays)
         dst = cam_dir / f"{cam_name}.jpg"
         shutil.copy2(img_path, dst)
-        # if image size differs from calibration, note scales
-        with Image.open(img_path) as im:
-            iw, ih = im.size
         sx = iw / float(cal_w) if cal_w else 1.0
         sy = ih / float(cal_h) if cal_h else 1.0
         K_img = K.copy()
@@ -233,7 +326,14 @@ def export_frame(
                 "K": K_img.reshape(-1).tolist(),
                 "dist5": dist5.tolist(),
                 "T_c_v": T_c_v.reshape(-1).tolist(),
+                "T_c_v_lidar_ref": T_c_v_lidar_ref.reshape(-1).tolist(),
                 "T_v_c": T_v_c.reshape(-1).tolist(),
+                "time_compensation": {
+                    "method": "ego_pose_linear_position_nlerp_quaternion",
+                    "lidar_reference_timestamp": lidar_timestamp,
+                    "camera_timestamp": camera_timestamp,
+                    "delta_ms": (camera_timestamp - lidar_timestamp) / 1e6,
+                },
                 "image": {
                     "uri": rel_img,
                     "mime": "image/jpeg",
@@ -252,8 +352,39 @@ def export_frame(
     n_occ = int(grid.centers.shape[0])
     points_info = None
     points_assets = None
+    frame_sensor_points_assets = None
     n_points_exported = 0
     if export_points:
+        write_f32(out_frame / "frame_sensor_points_xyz.f32.bin", frame_sensor_xyz)
+        write_u8(
+            out_frame / "frame_sensor_points_labels.u8.bin",
+            np.asarray(frame_sensor_labels, dtype=np.uint8),
+        )
+        write_u8(
+            out_frame / "frame_sensor_points_lidar_id.u8.bin",
+            np.asarray(frame_sensor_lidar_ids, dtype=np.uint8),
+        )
+        n_frame_sensor = int(frame_sensor_xyz.shape[0])
+        frame_sensor_points_assets = {
+            "n": n_frame_sensor,
+            "source": "lidar_merge_deskew",
+            "filtering": "none",
+            "xyz": asset_ref(
+                f"{prefix}/frame_sensor_points_xyz.f32.bin",
+                "float32",
+                [n_frame_sensor, 3],
+            ),
+            "labels": asset_ref(
+                f"{prefix}/frame_sensor_points_labels.u8.bin",
+                "uint8",
+                [n_frame_sensor],
+            ),
+            "lidar_id": asset_ref(
+                f"{prefix}/frame_sensor_points_lidar_id.u8.bin",
+                "uint8",
+                [n_frame_sensor],
+            ),
+        }
         # Prefer full static_agg (pose-transformed) + frame dynamic.
         # Deterministic static stride so scrubbing frames only moves coords.
         if xyz_s.shape[0] > 0:
@@ -345,7 +476,9 @@ def export_frame(
             "n_static_roi": int(xyz_s.shape[0]),
             "n_vis_points": int(vis_xyz.shape[0]),
             "n_points_exported": n_points_exported,
+            "ego_filter_removed": int(ego_filter_stats["removed"]),
         },
+        "ego_filter": {"config": ego_filter, "stats": ego_filter_stats},
         "assets": {
             "occupancy": {
                 "n": n_occ,
@@ -357,6 +490,7 @@ def export_frame(
                 "counts": asset_ref(f"{prefix}/occ_counts.i32.bin", "int32", [n_occ]),
             },
             "points": points_assets,
+            "frame_sensor_points": frame_sensor_points_assets,
             "cameras": cameras_meta,
         },
         "ego_pose": pose,
@@ -411,6 +545,7 @@ def main() -> int:
     ap.add_argument("--grid-size", type=float, default=0.05)
     ap.add_argument("--stride", type=int, default=2)
     ap.add_argument("--max-frames", type=int, default=3)
+    ap.add_argument("--skip-initial-seconds", type=float, default=1.0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--reuse-pred", action="store_true")
     ap.add_argument("--aggregate-static", action=argparse.BooleanOptionalAction, default=True)
@@ -425,24 +560,61 @@ def main() -> int:
     ap.add_argument("--z-max", type=float, default=20.0)
     ap.add_argument("--export-points", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--max-export-points", type=int, default=200000)
+    ap.add_argument("--geometry-quality-gate", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--layer-threshold", type=float, default=0.15)
+    ap.add_argument("--pose-shift-threshold", type=float, default=0.40)
+    ap.add_argument("--quality-sample-frames", type=int, default=5)
+    ap.add_argument("--ego-filter", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--ego-x-range", type=float, nargs=2, default=(-1.65, 1.65))
+    ap.add_argument("--ego-y-range", type=float, nargs=2, default=(-1.0, 2.5))
+    ap.add_argument("--ego-min-height", type=float, default=0.35)
+    ap.add_argument("--ego-max-height", type=float, default=4.0)
     args = ap.parse_args()
 
     clip_dir = (ROOT / args.backup_root / args.clip).resolve()
     if not clip_dir.is_dir():
         raise FileNotFoundError(clip_dir)
     scene_root = (ROOT / args.out_dir / args.clip).resolve()
-    scene_root.mkdir(parents=True, exist_ok=True)
     pred_dir = (
         Path(args.pred_dir).resolve()
         if args.pred_dir
         else (ROOT / "exp/robotruck/clip_video" / args.clip / "preds").resolve()
     )
-    pred_dir.mkdir(parents=True, exist_ok=True)
 
     all_ts = list_clip_frames(clip_dir)
+    pose_samples: list[tuple[int, dict]] = []
+    for pose_ts in all_ts:
+        pose_meta_path = clip_dir / "frames" / pose_ts / "frame.json"
+        if not pose_meta_path.is_file():
+            continue
+        pose_meta = json.loads(pose_meta_path.read_text())
+        ego = (pose_meta.get("dependency") or {}).get("ego_pose")
+        if ego and ego.get("pose") and ego.get("header", {}).get("stamp"):
+            pose_samples.append((pose_stamp_ns(ego), ego["pose"]))
+    pose_samples.sort(key=lambda row: row[0])
+    if len(pose_samples) < 2:
+        raise ValueError("at least two timestamped ego poses are required")
+    if all_ts and args.skip_initial_seconds > 0:
+        cutoff = int(all_ts[0]) + int(args.skip_initial_seconds * 1e9)
+        all_ts = [ts for ts in all_ts if int(ts) >= cutoff]
+        print(f"skip initial {args.skip_initial_seconds:g}s -> first={all_ts[0] if all_ts else 'none'}")
     timestamps = all_ts[:: max(1, args.stride)]
     if args.max_frames > 0:
         timestamps = timestamps[: args.max_frames]
+    geometry_quality = qgate.assess_clip_geometry(
+        clip_dir,
+        all_ts,
+        sample_frames=args.quality_sample_frames,
+        layer_threshold=args.layer_threshold,
+        pose_shift_threshold=args.pose_shift_threshold,
+    )
+    if args.geometry_quality_gate and not geometry_quality["allow_occ"]:
+        geometry_quality["action"] = "clip_rejected"
+        raise RuntimeError("GEOMETRY_QUALITY_REJECTED: " + json.dumps(geometry_quality, sort_keys=True))
+    else:
+        geometry_quality["action"] = "occ_allowed"
+    scene_root.mkdir(parents=True, exist_ok=True)
+    pred_dir.mkdir(parents=True, exist_ok=True)
     print(f"export clip={args.clip} frames={len(timestamps)}")
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -451,6 +623,15 @@ def main() -> int:
     x_range = (-args.bev_x_half, args.bev_x_half)
     y_range = (args.bev_y_min, args.bev_y_max)
     z_range = (args.z_min, args.z_max)
+    ego_filter = {
+        "enabled": bool(args.ego_filter),
+        "x_range": list(args.ego_x_range),
+        "y_range": list(args.ego_y_range),
+        "min_height": args.ego_min_height,
+        "max_height": args.ego_max_height,
+        "ground_fit_margin": 0.5,
+        "method": "semantic_ground_robust_plane/v1",
+    }
 
     static_agg = None
     if args.aggregate_static:
@@ -475,6 +656,7 @@ def main() -> int:
             voxel=args.static_voxel,
             cache_path=cache_path,
             use_oracle_boxes=True,
+            ego_filter=ego_filter,
         )
         if static_agg["xyz_map"].shape[0] == 0 and args.reuse_pred:
             static_agg = sag.load_or_build_static_aggregate(
@@ -490,6 +672,7 @@ def main() -> int:
                 voxel=args.static_voxel,
                 cache_path=cache_path,
                 use_oracle_boxes=True,
+                ego_filter=ego_filter,
             )
         print(f"static_agg N={static_agg['xyz_map'].shape[0]}")
         # Mirror static_agg into the scene package (map frame; frames only apply pose).
@@ -535,6 +718,7 @@ def main() -> int:
         "scene_id": args.clip,
         "clip_id": args.clip,
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "geometry_quality": geometry_quality,
         "defaults": {
             "occ_voxel": args.occ_voxel,
             "roi": {"x": [-24.0, 24.0], "y": [-25.0, 150.0], "z": [-5.0, 3.0]},
@@ -543,6 +727,7 @@ def main() -> int:
                 "y": "forward",
                 "z": "up",
             },
+            "ego_filter": ego_filter,
         },
         "taxonomy": {
             "fine": {
@@ -584,6 +769,8 @@ def main() -> int:
             occ_min_points=args.occ_min_points,
             export_points=args.export_points,
             max_export_points=args.max_export_points,
+            ego_filter=ego_filter,
+            pose_samples=pose_samples,
         )
         index["frames"].append(
             {

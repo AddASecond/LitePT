@@ -15,10 +15,38 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import bisect
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
+
+
+def _setup_cuda_env() -> None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ.pop("_CUDA_COMPAT_PATH", None)
+    os.environ.pop("Path", None)
+    ld = os.environ.get("LD_LIBRARY_PATH", "")
+    if "/usr/lib/x86_64-linux-gnu" not in ld.split(":"):
+        head = "/usr/lib/x86_64-linux-gnu"
+        cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
+        os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
+    os.environ["HAMI_DISABLE_WARN"] = "1"
+    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
+    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
+    # HAMI vGPU cuInit first-caller bugfix: torch must claim CUDA before cv2
+    # (opencv-python-cuda) hits its own hidden probe.
+    try:
+        import torch as _torch
+        _ = _torch.cuda.is_available()
+    except Exception:
+        pass
+
+
+_setup_cuda_env()
+
 
 import cv2
 import numpy as np
@@ -93,12 +121,15 @@ LIDAR_ID_DEFAULT_BGR = (160, 160, 160)
 
 
 def parse_camera(cam_doc: dict):
-    K = np.asarray(cam_doc["intrinsic"]["intrinsic"], dtype=np.float64)
+    # Explicit reshape guards against flat 9-element / 16-element lists that
+    # would otherwise break downstream 2-D indexing and cv2.shape assumptions.
+    K = np.asarray(cam_doc["intrinsic"]["intrinsic"], dtype=np.float64).reshape(3, 3)
     dist = np.asarray(cam_doc["intrinsic"]["distortion"], dtype=np.float64).reshape(-1)
     dist5 = np.zeros(5, dtype=np.float64)
     dist5[: min(5, dist.size)] = dist[:5]
-    # extrinsic.transformation is T_vehicle_camera (camera pose in vehicle)
-    T_v_c = np.asarray(cam_doc["extrinsic"]["transformation"], dtype=np.float64)
+    # extrinsic.transformation is T_vehicle_camera (camera pose in vehicle),
+    # i.e. p_vehicle = T_v_c @ p_camera.
+    T_v_c = np.asarray(cam_doc["extrinsic"]["transformation"], dtype=np.float64).reshape(4, 4)
     T_c_v = np.linalg.inv(T_v_c)
     w = int(cam_doc["intrinsic"]["width"])
     h = int(cam_doc["intrinsic"]["height"])
@@ -532,6 +563,93 @@ def list_clip_frames(clip_dir: Path) -> list[str]:
     return frames
 
 
+def _pose_stamp_ns(ego: dict, fallback_ns: int) -> int:
+    """Extract ego_pose.header.stamp → nanoseconds; fall back to frame timestamp."""
+    stamp = ((ego.get("header") or {}).get("stamp") or {})
+    if "sec" in stamp:
+        return int(stamp["sec"]) * 1_000_000_000 + int(stamp.get("nanosec", 0))
+    return int(fallback_ns)
+
+
+def build_clip_pose_samples(clip_dir: Path, all_ts: list[str]) -> list[tuple[int, dict]]:
+    """Collect (stamp_ns, pose_dict) sorted for every clip frame that has ego_pose."""
+    samples: list[tuple[int, dict]] = []
+    for ts in all_ts:
+        meta_path = clip_dir / "frames" / str(ts) / "frame.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        ego = (meta.get("dependency") or {}).get("ego_pose") or {}
+        pose = ego.get("pose")
+        if not pose:
+            continue
+        samples.append((_pose_stamp_ns(ego, int(ts)), pose))
+    samples.sort(key=lambda x: x[0])
+    return samples
+
+
+def interpolate_pose_matrix(
+    samples: list[tuple[int, dict]], timestamp_ns: int
+) -> np.ndarray:
+    """Linear position + nlerp quaternion → 4×4 map←vehicle at timestamp_ns.
+
+    Mirrors export_robotruck_occ_scene.interpolate_pose_matrix /
+    validate_raw_single_frame_projection.interpolate_pose.
+    """
+    if not samples:
+        return np.eye(4, dtype=np.float64)
+    times = [row[0] for row in samples]
+    hi = bisect.bisect_left(times, int(timestamp_ns))
+    if hi <= 0:
+        return sag.ego_pose_to_T_map_vehicle(samples[0][1])
+    if hi >= len(samples):
+        return sag.ego_pose_to_T_map_vehicle(samples[-1][1])
+    ta, pa = samples[hi - 1]
+    tb, pb = samples[hi]
+    denom = max(1, int(tb) - int(ta))
+    alpha = float(int(timestamp_ns) - int(ta)) / float(denom)
+    qa = np.array([pa["orientation"][k] for k in ("x", "y", "z", "w")], np.float64)
+    qb = np.array([pb["orientation"][k] for k in ("x", "y", "z", "w")], np.float64)
+    if np.dot(qa, qb) < 0:
+        qb = -qb
+    q = (1.0 - alpha) * qa + alpha * qb
+    q_norm = np.linalg.norm(q)
+    if q_norm < 1e-12:
+        q = qa
+    else:
+        q = q / q_norm
+    pose = {
+        "position": {
+            k: (1.0 - alpha) * float(pa["position"][k]) + alpha * float(pb["position"][k])
+            for k in ("x", "y", "z")
+        },
+        "orientation": dict(zip(("x", "y", "z", "w"), q.tolist())),
+    }
+    return sag.ego_pose_to_T_map_vehicle(pose)
+
+
+def camera_time_compensated_T(
+    T_c_v: np.ndarray,
+    pose_samples: list[tuple[int, dict]],
+    lidar_timestamp_ns: int,
+    camera_timestamp_ns: int,
+) -> np.ndarray:
+    """Return T_c_v_lidar_ref = T_c_v · inv(T_map_v_camera) · T_map_v_lidar.
+
+    Projecting a LiDAR-frame point (already in vehicle frame at LIDAR time)
+    with this matrix yields the camera-frame point as seen by the camera at
+    CAMERA time — i.e. it corrects for ego-motion between the two timestamps.
+    """
+    if not pose_samples or int(lidar_timestamp_ns) == int(camera_timestamp_ns):
+        return T_c_v
+    T_map_v_L = interpolate_pose_matrix(pose_samples, int(lidar_timestamp_ns))
+    T_map_v_C = interpolate_pose_matrix(pose_samples, int(camera_timestamp_ns))
+    return T_c_v @ np.linalg.inv(T_map_v_C) @ T_map_v_L
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -652,6 +770,16 @@ def main() -> int:
         timestamps = timestamps[: args.max_frames]
     print(f"clip={args.clip} frames={len(timestamps)} stride={args.stride}")
 
+    # Sorted ego-pose samples across the ENTIRE clip — needed for LiDAR↔camera
+    # time compensation (vehicle movement between the two sensor timestamps).
+    pose_samples = build_clip_pose_samples(clip_dir, all_ts)
+    print(
+        f"ego pose_samples={len(pose_samples)} "
+        f"range_ns=[{pose_samples[0][0] if pose_samples else 0}, "
+        f"{pose_samples[-1][0] if pose_samples else 0}]",
+        flush=True,
+    )
+
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     model, _ = _h.load_segmentor(ROOT / args.config_file, ROOT / args.weight, device)
 
@@ -718,6 +846,17 @@ def main() -> int:
         fr = clip_dir / "frames" / ts
         meta = json.loads((fr / "frame.json").read_text())
         sensors = meta["dependency"]["sensors"]
+
+        # Reference frame of the lidar points (lidar_merge_deskew if available,
+        # else nodeskew/raw).  Used together with per-camera timestamps to
+        # compensate ego-motion between capture instants.
+        _lid = (
+            sensors.get("lidar_merge_deskew")
+            or sensors.get("lidar_merge_nodeskew")
+            or sensors.get("lidar_merge")
+            or {}
+        )
+        lidar_ts = int(_lid.get("timestamp") or int(ts))
 
         pts = _h.load_lidar_bin(fr / "lidar_merge.bin", num_cols=len(_h.LIDAR_COLS))
         coord = pts[:, :3].astype(np.float32)
@@ -787,6 +926,14 @@ def main() -> int:
                 continue
             cam_doc = sensors[cam_name]
             K, dist5, T_c_v, cal_w, cal_h = parse_camera(cam_doc)
+            # Ego-motion time-compensation: project LiDAR (at lidar_ts vehicle
+            # frame) into the camera as seen at camera_ts.  Without this, any
+            # nonzero camera↔lidar timestamp delta causes visible pixel shift
+            # proportional to vehicle speed / depth.
+            cam_ts = int(cam_doc.get("timestamp") or int(lidar_ts))
+            T_c_v_proj = camera_time_compensated_T(
+                T_c_v, pose_samples, lidar_ts, cam_ts
+            )
             img = cv2.cvtColor(np.array(Image.open(img_path).convert("RGB")), cv2.COLOR_RGB2BGR)
             ih, iw = img.shape[:2]
             if iw != cal_w or ih != cal_h:
@@ -806,7 +953,8 @@ def main() -> int:
 
             if args.point_viz:
                 uv, cols = project_points(
-                    vis_xyz, vis_lab, K_s, dist5, T_c_v, nw, nh, max_points=100000, seed=i
+                    vis_xyz, vis_lab, K_s, dist5, T_c_v_proj, nw, nh,
+                    max_points=100000, seed=i,
                 )
                 if uv.shape[0]:
                     uv = uv.copy()
@@ -828,7 +976,7 @@ def main() -> int:
                     occ_sem_cols,
                     K_s,
                     dist5,
-                    T_c_v,
+                    T_c_v_proj,
                     nw,
                     nh,
                     title=f"{cam_name} occ",
