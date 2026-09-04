@@ -1,13 +1,9 @@
-"""Robotruck occupancy toolkit.
+"""OCC delivery & QA package (importable modules, no command router).
 
-Public entrypoints (use these):
-  produce.py   delivery: export | pipeline | batch | inproc | warmup | store
-  qa.py        offline QA: scan | triage | layer | project
-  scene_video.py
-  occ_viewer/  interactive debug viewer
-
-Libraries (imported, not run):
-  quality_gate, occupancy, static_agg, gss_mongo, export_scene, store
-
-Internals live in _impl/ (do not call directly unless debugging).
+Delivery:
+  quality_gate → export_scene → store → pipeline / batch / inproc
+QA / debug:
+  pose_badcase, triage, scene_video, layer_scan, validate_projection
+Libs:
+  occupancy, static_agg, gss_mongo, cuda_env
 """

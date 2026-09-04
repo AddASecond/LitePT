@@ -3,57 +3,35 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
-import os
 import shutil
 import struct
-import subprocess
 import sys
 from pathlib import Path
 
+from cuda_env import setup_cuda_env
 
-def _setup_cuda_env() -> None:
-    # Must run BEFORE any `subprocess.run(python ...)` that uses CUDA, and
-    # before any import of torch (materialize stage is CPU, but we set it here
-    # so children inherit fixed env for the export stage).
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    os.environ.pop("_CUDA_COMPAT_PATH", None)
-    os.environ.pop("Path", None)
-    ld = os.environ.get("LD_LIBRARY_PATH", "")
-    if "/usr/lib/x86_64-linux-gnu" not in ld.split(":"):
-        head = "/usr/lib/x86_64-linux-gnu"
-        cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
-        os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
-    os.environ["HAMI_DISABLE_WARN"] = "1"
-    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
-    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
-    # Warm up CUDA in THIS process too: when we later exec the exporter via
-    # subprocess (fork+exec), HAMI's libvgpu session state for the cgroup has
-    # already been primed by our own cuInit call, which eliminates one of the
-    # main 304-producing race windows.  Ignore result – subprocess is what
-    # actually needs it.
-    if os.environ.get("LITEPT_SKIP_CUDA_WARMUP") != "1":
-        try:
-            import torch as _torch
-            _ = _torch.cuda.is_available()
-        except Exception:
-            pass
-
-
-_setup_cuda_env()
-
+setup_cuda_env()
 
 import numpy as np
 from pymongo import MongoClient
 
-ROOT = Path(__file__).resolve().parents[3]
-SPEC = importlib.util.spec_from_file_location("occ_gridfs", ROOT / "tools/occ/_impl/store.py")
-STORE = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(STORE)
-INGEST = STORE.INGEST
+ROOT = Path(__file__).resolve().parents[2]
+_OCC = Path(__file__).resolve().parent
+if str(_OCC) not in sys.path:
+    sys.path.insert(0, str(_OCC))
+
+import export_scene
+import store as STORE
+
+
+def _call_main(module, argv: list[str]) -> int:
+    old = sys.argv[:]
+    try:
+        sys.argv = [getattr(module, "__file__", module.__name__), *argv]
+        return int(module.main() or 0)
+    finally:
+        sys.argv = old
 
 
 def json_write(path: Path, value) -> None:
@@ -134,7 +112,7 @@ def materialize_raw_cache(db, frame_collection: str, clip_collection: str, clip_
     index = []
     for number, raw in enumerate(frames, 1):
         ts = str(raw["timestamp"])
-        md5 = INGEST.raw_lidar_md5(raw) or raw.get("md5")
+        md5 = STORE.raw_lidar_md5(raw) or raw.get("md5")
         lidar = STORE.resolve_raw(md5, "lidar")
         frame_dir = cache / "frames" / ts
         link_or_convert_lidar(lidar, frame_dir / "lidar_merge.bin")
@@ -144,7 +122,7 @@ def materialize_raw_cache(db, frame_collection: str, clip_collection: str, clip_
             if not name.startswith("camera") or not isinstance(sensor, dict):
                 continue
             cam_md5 = sensor.get("md5")
-            if not isinstance(cam_md5, str) or not INGEST.MD5_RE.fullmatch(cam_md5):
+            if not isinstance(cam_md5, str) or not STORE.MD5_RE.fullmatch(cam_md5):
                 continue
             camera = STORE.resolve_raw(cam_md5, "camera")
             target = frame_dir / f"{name}.jpg"
@@ -169,7 +147,7 @@ def main() -> int:
     ap.add_argument("--clip-id", required=True)
     ap.add_argument("--scene-name", default="")
     ap.add_argument("--database", default="perception_experiment")
-    ap.add_argument("--mongo-uri", default=INGEST.DEFAULT_URI)
+    ap.add_argument("--mongo-uri", default=STORE.DEFAULT_URI)
     ap.add_argument("--cache-root", default="exp/robotruck/raw_volume_cache")
     ap.add_argument("--scene-root", default="exp/robotruck/occ_scenes")
     ap.add_argument("--asset-root", default="/data/rawdata-4/occupancy")
@@ -178,7 +156,7 @@ def main() -> int:
     ap.add_argument("--force-infer", action="store_true")
     ap.add_argument("--write", action="store_true")
     args = ap.parse_args()
-    raw_clip_collection = args.raw_clip_collection or INGEST.infer_collection(args.raw_frame_collection, "frames", "clips")
+    raw_clip_collection = args.raw_clip_collection or STORE.infer_collection(args.raw_frame_collection, "frames", "clips")
     scene_name = args.scene_name or f"mongo_{args.raw_frame_collection}_{args.clip_id}"
     cache = (ROOT / args.cache_root / scene_name).resolve()
     scene = (ROOT / args.scene_root / scene_name).resolve()
@@ -187,16 +165,29 @@ def main() -> int:
     db = client[args.database]
     if args.force_infer or not (scene / "index.json").is_file():
         materialize_raw_cache(db, args.raw_frame_collection, raw_clip_collection, args.clip_id, cache)
-        python = ROOT / ".venv_smoke/bin/python"
-        command = [str(python), str(ROOT / "tools/occ/_impl/export_scene.py"), "--clip", scene_name, "--backup-root", args.cache_root, "--out-dir", args.scene_root, "--stride", str(args.stride), "--max-frames", str(args.max_frames), "--export-points", "--aggregate-static"]
-        subprocess.run(command, cwd=ROOT, check=True)
+        rc = _call_main(export_scene, [
+            "--clip", scene_name,
+            "--backup-root", args.cache_root,
+            "--out-dir", args.scene_root,
+            "--stride", str(args.stride),
+            "--max-frames", str(args.max_frames),
+            "--export-points",
+            "--aggregate-static",
+        ])
+        if rc:
+            return rc
     else:
         print(f"reuse existing inference scene: {scene}", flush=True)
-    store_command = [str(ROOT / ".venv_smoke/bin/python"), str(ROOT / "tools/occ/_impl/store.py"), "--scene", str(scene), "--raw-frame-collection", args.raw_frame_collection, "--raw-clip-collection", raw_clip_collection, "--backup-root", args.cache_root, "--asset-root", args.asset_root]
+    store_argv = [
+        "--scene", str(scene),
+        "--raw-frame-collection", args.raw_frame_collection,
+        "--raw-clip-collection", raw_clip_collection,
+        "--backup-root", args.cache_root,
+        "--asset-root", args.asset_root,
+    ]
     if args.write:
-        store_command.append("--write")
-    subprocess.run(store_command, cwd=ROOT, check=True)
-    return 0
+        store_argv.append("--write")
+    return _call_main(STORE, store_argv)
 
 
 if __name__ == "__main__":

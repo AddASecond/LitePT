@@ -1,19 +1,18 @@
 """Export an MP4 from an already-exported occ scene package.
 
 No re-inference: reads cameras + occupancy (+ optional points) from the scene
-dir produced by tools/occ/_impl/export_scene.py, composites multi-cam
+dir produced by tools/occ/export_scene.py, composites multi-cam
 panels with scale-correct occ/point projections and a BEV occupancy strip.
 
 Usage:
   export PYTHONPATH=./
-  .venv_smoke/bin/python tools/occ/_impl/scene_video.py \\
+  .venv_smoke/bin/python tools/occ/scene_video.py \\
     --scene exp/robotruck/occ_scenes/stop_... \\
     --mode occ --fps 5 --tile-w 960 --tile-h 540
 """
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import sys
 import time
@@ -22,22 +21,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def _load(name: str, rel: str):
-    path = ROOT / rel
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-occmod = _load("robotruck_occupancy", "tools/occ/occupancy.py")
+_OCC = Path(__file__).resolve().parent
+if str(_OCC) not in sys.path:
+    sys.path.insert(0, str(_OCC))
+import occupancy as occmod
 
 
 def _read_f32(path: Path, n3: bool = True) -> np.ndarray:

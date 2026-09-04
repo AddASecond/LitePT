@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -22,7 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -49,15 +48,8 @@ CAM_ORDER = ["camera1", "camera2", "camera5", "camera6", "camera7", "camera8"]
 HEADER_H = 220
 
 
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-ls = _load("layer_scan", Path(__file__).with_name("layer_scan.py"))
-vrp = _load("vrp", Path(__file__).with_name("validate_projection.py"))
+import layer_scan as ls
+import validate_projection as vrp
 
 
 def parse_camera(cam_doc: dict):

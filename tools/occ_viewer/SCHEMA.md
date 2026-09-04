@@ -203,7 +203,7 @@ Mongo / GSS 落库（**推荐，与 raw 对齐**）见 [GSS_OCC_STORAGE.md](./GS
 
 ```bash
 export PYTHONPATH=./
-.venv_smoke/bin/python tools/occ/produce.py export \
+.venv_smoke/bin/python tools/occ/export_scene.py \
   --clip stop_1784423032302844849_vehicle-V002-20260719_090818 \
   --stride 2 --max-frames 2 --reuse-pred --occ-voxel 0.2 \
   --export-points --max-export-points 200000 --aggregate-static

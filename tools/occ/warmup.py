@@ -9,52 +9,31 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "tools"))
+ROOT = Path(__file__).resolve().parents[2]
+_OCC = Path(__file__).resolve().parent
+for path in (_OCC, ROOT / "tools"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
+from cuda_env import setup_cuda_env
 
-def _setup_cuda_env() -> None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    os.environ.pop("_CUDA_COMPAT_PATH", None)
-    os.environ.pop("Path", None)
-    ld = os.environ.get("LD_LIBRARY_PATH", "")
-    if "/usr/lib/x86_64-linux-gnu" not in ld.split(":"):
-        head = "/usr/lib/x86_64-linux-gnu"
-        cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
-        os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
-    os.environ["HAMI_DISABLE_WARN"] = "1"
-    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
-    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
+setup_cuda_env(warmup=False)
 
-
-_setup_cuda_env()
-
-# HAMI 惩罚期 / fake 模式下禁止触碰 CUDA（cuInit 会段错误）
-import argparse  # noqa: E402
-
-_args_probe = argparse.ArgumentParser()
 _will_infer = "--mode infer" in " ".join(sys.argv) or "--mode" not in " ".join(sys.argv)
 if _will_infer and os.environ.get("LITEPT_SKIP_CUDA_WARMUP") != "1":
-    import torch as _torch  # noqa: E402
-
     try:
+        import torch as _torch
         _ = _torch.cuda.is_available()
     except Exception:
         pass
 
-import numpy as np  # noqa: E402
-
-_spec = importlib.util.spec_from_file_location(
-    "h", ROOT / "tools/infer_robotruck_mongo_frame.py")
-h = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(h)
+import numpy as np
+import infer_robotruck_mongo_frame as h
 
 
 def main() -> int:

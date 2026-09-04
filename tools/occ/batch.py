@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import os
-import subprocess
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -13,7 +11,7 @@ from pathlib import Path
 
 from pymongo import MongoClient
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[2]
 TAGS = [
     "highway", "mountainous_winding_road", "bridge", "urban_street_scene",
     "interchange_ramp", "toll_station", "tunnel", "logistics_park",
@@ -26,16 +24,14 @@ TAGS = [
 ]
 
 
-def load_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+_OCC = Path(__file__).resolve().parent
+if str(_OCC) not in sys.path:
+    sys.path.insert(0, str(_OCC))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-
-GSS = load_module("lidar14_batch_gss", ROOT / "tools/occ/gss_mongo.py")
+import gss_mongo as GSS
+import pipeline as PIPELINE
 
 
 def free_gib(db) -> float:
@@ -133,10 +129,7 @@ def main() -> int:
             return 0
         scene_name = f"batch_s5_{clip_id}"
         print(f"[{number}/{len(clips)}] START tag={tag} clip={clip_id} free={available:.2f}GiB", flush=True)
-        command = [
-            str(ROOT / ".venv_smoke/bin/python"),
-            str(ROOT / "tools/occ/produce.py"),
-            "pipeline",
+        argv = [
             "--raw-frame-collection", "raw_data_frames_lidar14_0813",
             "--raw-clip-collection", "raw_data_clips_lidar14_0813",
             "--clip-id", clip_id,
@@ -145,7 +138,12 @@ def main() -> int:
             "--write",
         ]
         try:
-            subprocess.run(command, cwd=ROOT, check=True)
+            old_argv = sys.argv[:]
+            sys.argv = [PIPELINE.__file__, *argv]
+            rc = int(PIPELINE.main() or 0)
+            sys.argv = old_argv
+            if rc:
+                raise RuntimeError(f"pipeline rc={rc}")
         except Exception as error:
             record_failure(db, clip_id=clip_id, tag=tag, stage="pipeline", error=error)
             print(f"[{number}/{len(clips)}] FAILED pipeline tag={tag} clip={clip_id}: {error}", flush=True)

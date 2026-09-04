@@ -8,7 +8,7 @@ Separates data production from visualization:
 
 Usage:
   export PYTHONPATH=./
-  .venv_smoke/bin/python tools/occ/_impl/export_scene.py \\
+  .venv_smoke/bin/python tools/occ/export_scene.py \\
     --clip stop_1784423032302844849_vehicle-V002-20260719_090818 \\
     --stride 2 --max-frames 3 --reuse-pred --occ-voxel 0.2 --export-points
 """
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import bisect
-import importlib.util
 import json
 import os
 import shutil
@@ -24,59 +23,25 @@ import sys
 from pathlib import Path
 
 
-def _setup_cuda_env() -> None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    os.environ.pop("_CUDA_COMPAT_PATH", None)
-    os.environ.pop("Path", None)
-    ld = os.environ.get("LD_LIBRARY_PATH", "")
-    if "/usr/lib/x86_64-linux-gnu" not in ld.split(":"):
-        head = "/usr/lib/x86_64-linux-gnu"
-        cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
-        os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
-    os.environ["HAMI_DISABLE_WARN"] = "1"
-    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
-    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
-    # CUDA init order bugfix under HAMI libvgpu.so: the first library that
-    # calls cuInit wins the vGPU-initialisation race.  cv2 / matplotlib (Qt)
-    # have their own CUDA probes and, under HAMI, occasionally return 304 on
-    # the first call which poisons torch's later init.  Initialise via torch
-    # NOW, before either numpy/cv2/matplotlib or any child import grabs it.
-    if os.environ.get("LITEPT_SKIP_CUDA_WARMUP") != "1":
-        import torch as _torch
-        try:
-            _ok = _torch.cuda.is_available()
-        except Exception:
-            pass
+from cuda_env import setup_cuda_env
 
-
-_setup_cuda_env()
-
+setup_cuda_env()
 
 import numpy as np
 import torch
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+ROOT = Path(__file__).resolve().parents[2]
+_OCC = Path(__file__).resolve().parent
+for path in (ROOT, _OCC, ROOT / "tools"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-
-def _load(name: str, rel: str):
-    path = ROOT / rel
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_h = _load("infer_robotruck_mongo_frame", "tools/infer_robotruck_mongo_frame.py")
-sag = _load("robotruck_static_agg", "tools/occ/static_agg.py")
-qgate = _load("robotruck_quality_gate", "tools/occ/quality_gate.py")
-occmod = _load("robotruck_occupancy", "tools/occ/occupancy.py")
-vis = _load("visualize_mod", "visualize.py")
+import infer_robotruck_mongo_frame as _h
+import occupancy as occmod
+import quality_gate as qgate
+import static_agg as sag
+import visualize as vis
 
 CAM_ORDER = [
     "camera1",

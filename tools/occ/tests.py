@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
-"""Unit tests for the GSS OCC MongoDB schema builder."""
+"""OCC unit tests."""
 from __future__ import annotations
 
-import importlib.util
+import sys
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+_OCC = Path(__file__).resolve().parent
+if str(_OCC) not in sys.path:
+    sys.path.insert(0, str(_OCC))
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "gss_mongo.py"
-SPEC = importlib.util.spec_from_file_location("gss_occ_mongo_tested", MODULE_PATH)
-GSS = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(GSS)
+import gss_mongo as GSS
+import store as STORE
+
+
+class ContentAddressedOccStoreTest(unittest.TestCase):
+    def test_store_is_content_addressed_and_deduplicated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "occ_ijk.i32.bin"
+            source.write_bytes(b"same OCC payload")
+            first = STORE.store(source, root / "assets")
+            second = STORE.store(source, root / "assets")
+            self.assertEqual(first, second)
+            self.assertEqual(first["storage"], "content_addressed_file")
+            self.assertEqual(first["sha256"], STORE.sha256(source))
+            self.assertEqual(Path(first["uri"]).read_bytes(), source.read_bytes())
+            self.assertNotIn("gridfs_id", first)
 
 
 class GssOccMongoTest(unittest.TestCase):

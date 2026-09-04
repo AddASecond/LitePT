@@ -10,7 +10,7 @@ HAMI notes:
 
 Usage (from LitePT root):
   source .cuda_env.sh
-  .venv_smoke/bin/python tools/occ/run_inproc.py \\
+  python tools/occ/inproc.py \\
       --clips-json /tmp/random10_clips.json \\
       --backup-root exp/robotruck/raw_volume_cache \\
       --scenes-root exp/robotruck/occ_scenes \\
@@ -20,23 +20,13 @@ Usage (from LitePT root):
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[2]
 assert ROOT.name == "LitePT", "run from LitePT checkout; got: " + str(ROOT)
-
-
-def load_mod(name: str, rel: str):
-    spec = importlib.util.spec_from_file_location(name, ROOT / rel)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def main() -> None:
@@ -79,10 +69,13 @@ def main() -> None:
     print(f"[plan] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
           f"_CUDA_COMPAT_PATH={os.environ.get('_CUDA_COMPAT_PATH')}")
 
-    # ------------------------------------------------------------------
-    # Import project modules (runs their module-level _setup_cuda_env).
-    # Reuse modules already exec'd by export (same objects; avoid double import).
-    export_mod = load_mod("export_scene", "tools/occ/_impl/export_scene.py")
+    _OCC = Path(__file__).resolve().parent
+    if str(_OCC) not in sys.path:
+        sys.path.insert(0, str(_OCC))
+    if str(ROOT / "tools") not in sys.path:
+        sys.path.insert(0, str(ROOT / "tools"))
+    import export_scene as export_mod
+    import store as store_mod
     qgate = export_mod.qgate
     sag = export_mod.sag
     infer_mod = export_mod._h
@@ -90,7 +83,6 @@ def main() -> None:
     export_frame_fn = export_mod.export_frame
     pose_stamp_ns = export_mod.pose_stamp_ns
     load_segmentor = infer_mod.load_segmentor
-    store_mod = load_mod("store_gridfs", "tools/occ/_impl/store.py")
 
     import torch
     gpu_ok = torch.cuda.is_available()
