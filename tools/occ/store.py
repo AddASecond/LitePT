@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write OCC scene packages into Mongo + content-addressed files under /data/rawdata*."""
+"""Prod: write OCC scene packages into Mongo + content-addressed files under /data/rawdata*."""
 from __future__ import annotations
 
 import argparse
@@ -13,13 +13,7 @@ from typing import Any
 
 from pymongo import ASCENDING, MongoClient
 
-from paths import ROOT
-RAW_ROOTS = tuple(Path(f"/data/rawdata{s}") for s in ("", "-1", "-2", "-3", "-4"))
-DEFAULT_ASSET_ROOT = Path("/data/rawdata-4/occupancy")
-DEFAULT_URI = os.environ.get(
-    "ROBOTRUCK_MONGO_URI",
-    "mongodb://krk030-mongodb:27017/?authSource=perception_experiment",
-)
+from paths import ROOT, RAW_ROOTS, DEFAULT_ASSET_ROOT, DEFAULT_URI
 MD5_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
 

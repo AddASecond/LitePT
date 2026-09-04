@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Offline pose/PC layering QA (not delivery SoT — that is quality_gate.py).
+"""Debug: offline pose/PC badcase scan → REJECT list for triage (effect frozen).
 
-Five tunables: T_MED / T_GPC / T_MAX / T_NINF / T_DRIFT_REL → REJECT/HIGH/WARN/CLEAN.
-Viz: tools/occ/triage.py. Out: exp/robotruck/pose_badcase/
+Delivery reject in export is quality_gate.py; this script is the offline SoT for
+dataset QA lists (T_MED/T_GPC/T_MAX/T_NINF/T_DRIFT_REL → DRIFT/SOFT/HARD).
+Viz: triage.py. Out: exp/robotruck/pose_badcase/
 """
 from __future__ import annotations
 

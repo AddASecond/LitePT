@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-"""Materialize raw clip cache → export_scene → store (one clip)."""
+"""Prod: materialize Mongo raw → export_scene → store (one clip). CUDA only when exporting."""
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
 
-from cuda_env import setup_cuda_env
-from paths import ROOT, ensure_import_path
+from paths import ROOT, DEFAULT_URI, RAW_ROOTS, ensure_import_path
 
-setup_cuda_env()
 ensure_import_path()
 
 import numpy as np
 from pymongo import MongoClient
 
-import export_scene
 import store as STORE
 
 
@@ -127,9 +124,16 @@ def materialize_raw_cache(db, frame_collection: str, clip_collection: str, clip_
     json_write(cache / "frames_index.json", index)
     json_write(cache / "SUMMARY.json", {
         "clip_id": clip_id, "mongo_frame_count": len(frames),
-        "raw_roots": [str(p) for p in STORE.RAW_ROOTS],
+        "raw_roots": [str(p) for p in RAW_ROOTS],
     })
     return len(frames)
+
+
+def _export_scene(argv: list[str]) -> int:
+    from cuda_env import setup_cuda_env
+    setup_cuda_env()
+    import export_scene
+    return int(export_scene.main(argv) or 0)
 
 
 def run(
@@ -139,7 +143,7 @@ def run(
     raw_clip_collection: str = "",
     scene_name: str = "",
     database: str = "perception_experiment",
-    mongo_uri: str = STORE.DEFAULT_URI,
+    mongo_uri: str = DEFAULT_URI,
     cache_root: str = "exp/robotruck/raw_volume_cache",
     scene_root: str = "exp/robotruck/occ_scenes",
     asset_root: str = "/data/rawdata-4/occupancy",
@@ -159,7 +163,7 @@ def run(
     db = client[database]
     if force_infer or not (scene / "index.json").is_file():
         materialize_raw_cache(db, raw_frame_collection, raw_clip_collection, clip_id, cache)
-        rc = export_scene.main([
+        rc = _export_scene([
             "--clip", scene_name,
             "--backup-root", cache_root,
             "--out-dir", scene_root,
@@ -189,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--clip-id", required=True)
     ap.add_argument("--scene-name", default="")
     ap.add_argument("--database", default="perception_experiment")
-    ap.add_argument("--mongo-uri", default=STORE.DEFAULT_URI)
+    ap.add_argument("--mongo-uri", default=DEFAULT_URI)
     ap.add_argument("--cache-root", default="exp/robotruck/raw_volume_cache")
     ap.add_argument("--scene-root", default="exp/robotruck/occ_scenes")
     ap.add_argument("--asset-root", default="/data/rawdata-4/occupancy")

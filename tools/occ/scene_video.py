@@ -1,4 +1,4 @@
-"""Export MP4 from an existing OCC scene package (no re-inference)."""
+"""Debug: MP4 from an existing OCC scene package (no re-inference)."""
 from __future__ import annotations
 
 import argparse

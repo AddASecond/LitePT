@@ -1,4 +1,4 @@
-"""Clip-level geometry quality gate for OCC delivery (export_scene / inproc SoT).
+"""Prod: clip-level geometry quality gate (single SoT for export + offline scan).
 
 Rejects corroborated multi-lidar height layering or high-confidence pose-alignment failure.
 """

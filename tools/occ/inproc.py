@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""In-process multi-clip OCC export+store (one CUDA process; HAMI-safe).
+"""Prod: multi-clip in-process export+store (one CUDA process; HAMI-safe).
 
-Each clip: quality_gate → export_frame loop → store.run. Defaults differ from
-export_scene CLI (ego box / occ_min_points) — do not merge the two runners.
+Same export_frame as export_scene, but multi-clip production defaults stay:
+  ego  x∈[-3.6,3.6], y∈[-1.2,1.2]   (export_scene CLI is narrower by default)
+  occ_min_points=2                  (export_scene CLI default=1)
+  BEV ±50m, grid_size=0.1, reuse_pred → then store.run
+
+Changing these to export_scene CLI defaults would change OCC content.
 """
 from __future__ import annotations
 

@@ -12,18 +12,17 @@ from pathlib import Path
 
 import numpy as np
 
-from paths import ROOT, ensure_import_path
+from paths import ROOT, RAW_ROOTS, DEFAULT_URI, ensure_import_path
 
 ensure_import_path()
-import store as STORE
 from validate_projection import (  # noqa: E402
     read_binary_pcd, quat_to_rotation)
 
 BACKUP = ROOT / "exp/robotruck/raw_volume_cache"
 OUT = ROOT / "exp/robotruck/pose_badcase"
-RAW_ROOTS = list(STORE.RAW_ROOTS)
+RAW_ROOTS = list(RAW_ROOTS)
 
-MONGO_URI = STORE.DEFAULT_URI
+MONGO_URI = DEFAULT_URI
 DB = "perception_experiment"
 FRAMES_COL = "raw_data_frames_lidar14_0813"
 CLIPS_COL = "raw_data_clips_lidar14_0813"

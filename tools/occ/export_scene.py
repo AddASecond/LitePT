@@ -1,4 +1,4 @@
-"""Export OCC scene packages (cameras + voxels + optional points) for the viewer.
+"""Prod: export OCC scene packages (cameras + voxels + optional points).
 
 python tools/occ/export_scene.py --clip <name> --stride 2 --max-frames 3 --reuse-pred --export-points
 """
@@ -480,10 +480,9 @@ def export_frame(
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument(
-        "--clip",
-        default="stop_1784423032302844849_vehicle-V002-20260719_090818",
-    )
+    ap.add_argument("--clip", default="")
+    ap.add_argument("--clips-json", default="", help="JSON list of {clip_id}; overrides --clip")
+    ap.add_argument("--scene-prefix", default="", help="scene/cache name = prefix + clip_id")
     ap.add_argument("--backup-root", default="data/robotruck_clips_backup")
     ap.add_argument("--out-dir", default="exp/robotruck/occ_scenes")
     ap.add_argument("--pred-dir", default="", help="Default: exp/robotruck/clip_video/<clip>/preds")
@@ -521,6 +520,29 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ego-max-height", type=float, default=4.0)
     args = ap.parse_args(argv)
 
+    clips: list[str]
+    if args.clips_json:
+        payload = json.loads(Path(args.clips_json).read_text())
+        clips = [c["clip_id"] if isinstance(c, dict) else str(c) for c in payload]
+    elif args.clip:
+        clips = [args.clip]
+    else:
+        raise SystemExit("need --clip or --clips-json")
+
+    rc = 0
+    for clip_id in clips:
+        scene = f"{args.scene_prefix}{clip_id}" if args.scene_prefix else clip_id
+        one = argparse.Namespace(**vars(args))
+        one.clip = scene
+        try:
+            rc = max(rc, int(export_one(one) or 0))
+        except Exception as exc:
+            print(f"FAIL {scene}: {exc}", flush=True)
+            rc = max(rc, 1)
+    return rc
+
+
+def export_one(args) -> int:
     clip_dir = (ROOT / args.backup_root / args.clip).resolve()
     if not clip_dir.is_dir():
         raise FileNotFoundError(clip_dir)

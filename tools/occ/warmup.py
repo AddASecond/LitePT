@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Precompute preds for a materialized clip (union of agg-stride + export-stride frames)."""
+"""Infer: precompute preds for a materialized clip (agg-stride ∪ export-stride frames)."""
 from __future__ import annotations
 
 import argparse

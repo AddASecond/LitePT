@@ -1,27 +1,17 @@
 #!/usr/bin/env python3
-"""Build and publish LitePT occupancy results using the GSS document layout.
-
-The GSS-facing collection embeds ``clips -> frames -> occupancy``.  Large
-arrays remain in GridFS and are referenced by the frame occupancy document.
-The lower-level ``occ_data_frames_*`` and ``occ_data_clips_*`` collections are
-kept as inference/run records and are not the primary GSS dataset interface.
-"""
+"""Prod helper: build/publish GSS occupancy groundtruth documents."""
 from __future__ import annotations
 
 import argparse
 import copy
-import os
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from bson import BSON
 from pymongo import ASCENDING, MongoClient
 
+from paths import DEFAULT_URI
 
-DEFAULT_URI = os.environ.get(
-    "ROBOTRUCK_MONGO_URI",
-    "mongodb://krk030-mongodb:27017/?authSource=perception_experiment",
-)
 MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 
 
