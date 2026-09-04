@@ -1,4 +1,9 @@
-"""Geometry-based quality gates for Robotruck OCC clips."""
+"""Clip-level geometry quality gate for OCC delivery.
+
+Used by export_robotruck_occ_scene (default ON) and run_random10_inproc.
+Rejects clips with corroborated multi-lidar height layering or high-confidence
+pose-alignment failure. This is the single source of truth for production reject.
+"""
 from __future__ import annotations
 
 import json

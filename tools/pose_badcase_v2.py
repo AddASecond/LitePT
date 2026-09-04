@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Pose / 点云分层 badcase 扫描 v2（简洁版）。
+"""Pose / 点云分层 badcase 扫描（离线数据集 QA，不进 OCC export 主路径）。
 
-流程（无旧 GATE）：
+交付拒收以 tools/robotruck_quality_gate.py（export 默认开启）为准。
+本脚本用于全库扫描 + 人工 triage（配合 reject_triage_viz）：
   1) 运动学：轨迹是否车辆可实现 → feasible / n_infeas
   2) 选诡异窗 + 参考窗，算点云对齐：maxA / medA / ratio / gpc
   3) 必要时做 pose-shift：shift / rel / cons

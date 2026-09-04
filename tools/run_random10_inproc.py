@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""Run 10 random clips export + store in ONE Python interpreter.
+"""In-process OCC export+store runner (HAMI-safe single CUDA process).
 
-This is the definitive CUDA-stable runner for the HAMI-vGPU container:
-  * environment fixes (CUDA_VISIBLE_DEVICES, unset compat/Path, …) MUST apply
-    BEFORE Python launches — source LitePT/.cuda_env.sh beforehand, because
-    HAMI libvgpu.so reads env at process ld.so load time, not at Python time.
-  * torch CUDA is inited exactly once inside this ONE process (model, spconv
-    warmups, all clip exports, all store writes).
-  * no subprocess / shell for CUDA work – every CUDA call stays in one
-    interpreter, so HAMI vGPU never sees a "new process requesting CUDA"
-    event (that is the only proven way to avoid error 304 on this platform).
+Production quality: each clip runs robotruck_quality_gate before OCC export
+(same gate as export_robotruck_occ_scene). Rejected clips are skipped.
+
+HAMI notes:
+  * source LitePT/.cuda_env.sh before launching Python
+  * keep all CUDA work in this one interpreter (no CUDA subprocesses)
 
 Usage (from LitePT root):
   source .cuda_env.sh
@@ -64,6 +61,15 @@ def main() -> None:
     ap.add_argument("--no-write-store", dest="write_store", action="store_false",
                     help="disable store step (useful for smoke tests).")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--geometry-quality-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="reject clips that fail robotruck_quality_gate (default: on)",
+    )
+    ap.add_argument("--quality-sample-frames", type=int, default=5)
+    ap.add_argument("--layer-threshold", type=float, default=None)
+    ap.add_argument("--pose-shift-threshold", type=float, default=None)
     args = ap.parse_args()
 
     clips = json.loads(args.clips_json.read_text())
@@ -77,6 +83,7 @@ def main() -> None:
     # Import project modules (runs their module-level _setup_cuda_env).
     # `export_scene` module re-exports everything we need.
     export_mod = load_mod("export_scene", "tools/export_robotruck_occ_scene.py")
+    qgate = load_mod("robotruck_quality_gate", "tools/robotruck_quality_gate.py")
     list_clip_frames = export_mod.list_clip_frames
     export_frame_fn = export_mod.export_frame
     pose_stamp_ns = export_mod.pose_stamp_ns
@@ -152,6 +159,26 @@ def main() -> None:
             frame_ids = frame_ids[:args.max_frames_per_clip]
         print(f"  frames to export: {len(frame_ids)} / total {len(all_ts)} "
               f"(pose_samples={len(pose_samples)})")
+
+        gate_kw = {"sample_frames": args.quality_sample_frames}
+        if args.layer_threshold is not None:
+            gate_kw["layer_threshold"] = args.layer_threshold
+        if args.pose_shift_threshold is not None:
+            gate_kw["pose_shift_threshold"] = args.pose_shift_threshold
+        geometry_quality = qgate.assess_clip_geometry(clip_dir, all_ts, **gate_kw)
+        if args.geometry_quality_gate and not geometry_quality["allow_occ"]:
+            geometry_quality["action"] = "clip_rejected"
+            print(f"  SKIP GEOMETRY_QUALITY_REJECTED: {geometry_quality.get('reasons')}")
+            status.append({
+                "i": i,
+                "clip_id": clip_id,
+                "rc": 2,
+                "msg": "GEOMETRY_QUALITY_REJECTED",
+                "geometry_quality": geometry_quality,
+            })
+            continue
+        geometry_quality["action"] = "occ_allowed"
+        print(f"  geometry_quality: allow_occ=True warnings={geometry_quality.get('warnings')}")
 
         # Pred cache under scene dir for reuse between runs
         pred_dir = out_scene / "_pred_cache"
@@ -302,6 +329,7 @@ def main() -> None:
             "x_range": list(x_range), "y_range": list(y_range), "z_range": list(z_range),
             "class_names": (last_frame_meta or {}).get("class_names", []),
             "class_colors_rgb": (last_frame_meta or {}).get("class_colors_rgb", []),
+            "geometry_quality": geometry_quality,
         }
         out_scene.mkdir(parents=True, exist_ok=True)
         (out_scene / "index.json").write_text(json.dumps(index_doc))

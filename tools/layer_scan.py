@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
-"""全量 clip 分层（鬼影）扫描: pose 分层 + 点云分层 两类判别。
+"""全量 clip 点云分层扫描（离线辅助；交付拒收请用 robotruck_quality_gate）。
 
-Pose 分层 (POSE_*): 位置二阶差分/垂直速度/速度突刺 —— ego_pose 跳变。
-点云分层 (PC_LAYER): 取 3 对相距 60 帧的点云，各自用本帧 ego_pose 变换到
-map 系后做跨帧最近邻对齐。pose 正确时静态结构重合 (p20 NN ~ 0.1m)；
-pose 错/鬼影时同一物体被复制到多个位置，NN 距离显著拉大。
-
-点云来源: 本地 raw_volume_cache 的 lidar_merge.bin，否则按 md5 直读
-/data/rawdata{,-1..4}/lidar/xx/yy/<md5>.pcd（不落盘）。
-
-用法:
-  tools/layer_scan.py --clips <uuid> ...     # 校验指定 clip
-  tools/layer_scan.py --all                  # 全量 mongo clips 集合
-输出: exp/robotruck/pose_badcase/layer_metrics.json + layer_badcase_list.txt
+为 pose_badcase_v2 提供 global_pc_p20（layer_metrics.json）及 mongo/点云加载工具。
+主入口仍是 pose_badcase_v2 + reject_triage_viz。
 """
 from __future__ import annotations
 
