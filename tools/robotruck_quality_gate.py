@@ -149,10 +149,19 @@ def assess_clip_geometry(
     """Reject only strongly corroborated layering or pose-alignment failures."""
     if len(timestamps) < 3:
         return {"allow_occ": False, "reasons": ["insufficient_frames"], "warnings": []}
+    frame_cache: dict[str, tuple[np.ndarray, dict]] = {}
+
+    def load_cached(timestamp: str) -> tuple[np.ndarray, dict]:
+        hit = frame_cache.get(timestamp)
+        if hit is None:
+            hit = _load(clip_dir, timestamp)
+            frame_cache[timestamp] = hit
+        return hit
+
     sample_index = np.linspace(0, len(timestamps)-1, min(sample_frames, len(timestamps)), dtype=int)
     layer_rows = []
     for index in sample_index:
-        points, _ = _load(clip_dir, timestamps[index])
+        points, _ = load_cached(timestamps[index])
         layer_rows.append(_layer_score(points, layer_min_overlap))
     valid_layer = [row for row in layer_rows if row["score"] is not None]
     layer_score = float(np.median([row["score"] for row in valid_layer])) if valid_layer else None
@@ -178,8 +187,8 @@ def assess_clip_geometry(
     pose_rows = []
     shifts = np.linspace(-1.2, 1.2, 25)
     for index, next_index in pose_pairs:
-        first_points, first_meta = _load(clip_dir, timestamps[index])
-        next_points, next_meta = _load(clip_dir, timestamps[next_index])
+        first_points, first_meta = load_cached(timestamps[index])
+        next_points, next_meta = load_cached(timestamps[next_index])
         first_map = _structural_map(first_points, first_meta, 0.4, 8000)
         next_map = _structural_map(next_points, next_meta, 0.4, 8000)
         p0 = _pose_matrix(first_meta["dependency"]["ego_pose"]["pose"])[:3, 3]

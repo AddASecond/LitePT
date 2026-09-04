@@ -56,8 +56,20 @@ def _load(name: str, path: Path):
 
 
 ls = _load("layer_scan", ROOT / "tools/layer_scan.py")
-rrv = _load("rrv", ROOT / "tools/render_robotruck_clip_video.py")
 vrp = _load("vrp", ROOT / "tools/validate_raw_single_frame_projection.py")
+
+
+def parse_camera(cam_doc: dict):
+    """Same as render_robotruck_clip_video.parse_camera (avoid loading that CUDA module)."""
+    K = np.asarray(cam_doc["intrinsic"]["intrinsic"], dtype=np.float64).reshape(3, 3)
+    dist = np.asarray(cam_doc["intrinsic"]["distortion"], dtype=np.float64).reshape(-1)
+    dist5 = np.zeros(5, dtype=np.float64)
+    dist5[: min(5, dist.size)] = dist[:5]
+    T_v_c = np.asarray(cam_doc["extrinsic"]["transformation"], dtype=np.float64).reshape(4, 4)
+    T_c_v = np.linalg.inv(T_v_c)
+    w = int(cam_doc["intrinsic"]["width"])
+    h = int(cam_doc["intrinsic"]["height"])
+    return K, dist5, T_c_v, w, h
 
 
 def load_rejects() -> list[dict]:
@@ -359,7 +371,7 @@ def project_cam_panel(
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         return panel
     try:
-        K, dist5, T_c_v, cal_w, cal_h = rrv.parse_camera(cam_doc)
+        K, dist5, T_c_v, cal_w, cal_h = parse_camera(cam_doc)
     except Exception as exc:
         cv2.putText(panel, f"{cam_name}: calib err", (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)

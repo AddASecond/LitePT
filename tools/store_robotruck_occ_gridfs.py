@@ -12,7 +12,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import shutil
 from pathlib import Path
 
 from pymongo import MongoClient
@@ -57,8 +56,12 @@ def store(path: Path, asset_root: Path) -> dict:
     if not target.is_file():
         temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
         try:
-            shutil.copyfile(path, temporary)
-            if sha256(temporary) != digest:
+            copy_digest = hashlib.sha256()
+            with path.open("rb") as src, temporary.open("wb") as dst:
+                for chunk in iter(lambda: src.read(8 * 1024 * 1024), b""):
+                    copy_digest.update(chunk)
+                    dst.write(chunk)
+            if copy_digest.hexdigest() != digest:
                 raise IOError(f"checksum mismatch while storing {path}")
             os.replace(temporary, target)
         finally:

@@ -81,14 +81,14 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # Import project modules (runs their module-level _setup_cuda_env).
-    # `export_scene` module re-exports everything we need.
+    # Reuse modules already exec'd by export (same objects; avoid double import).
     export_mod = load_mod("export_scene", "tools/export_robotruck_occ_scene.py")
-    qgate = load_mod("robotruck_quality_gate", "tools/robotruck_quality_gate.py")
+    qgate = export_mod.qgate
+    sag = export_mod.sag
+    infer_mod = export_mod._h
     list_clip_frames = export_mod.list_clip_frames
     export_frame_fn = export_mod.export_frame
     pose_stamp_ns = export_mod.pose_stamp_ns
-    sag = load_mod("static_agg", "tools/robotruck_static_agg.py")
-    infer_mod = load_mod("infer_rf", "tools/infer_robotruck_mongo_frame.py")
     load_segmentor = infer_mod.load_segmentor
     store_mod = load_mod("store_gridfs", "tools/store_robotruck_occ_gridfs.py")
 
@@ -122,8 +122,6 @@ def main() -> None:
 
     # Shared segmentor across clips – saves reload time.
     model = None
-    # Shared client handle
-    mongo_client = None  # store_mod.main() uses its own MongoClient internally
 
     status = []
     for i, c in enumerate(clips, 1):

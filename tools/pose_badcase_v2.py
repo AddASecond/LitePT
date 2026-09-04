@@ -210,13 +210,24 @@ def _pc_pair_metric(pa: np.ndarray, pb: np.ndarray) -> float:
     return float(np.percentile(d, 20))
 
 
-def _pair_cloud(cid: str, valid: list, a: int, b: int):
+def _pair_cloud(cid: str, valid: list, a: int, b: int, cloud_cache: dict | None = None):
     fa, fb = valid[a][1], valid[b][1]
     if fa[2] is None or fb[2] is None or not fa[3] or not fb[3]:
         return None
+
+    def _get(ts: str, md5: str):
+        if cloud_cache is None:
+            return load_cloud(cid, ts, md5)
+        key = (ts, md5)
+        hit = cloud_cache.get(key)
+        if hit is None:
+            hit = load_cloud(cid, ts, md5)
+            cloud_cache[key] = hit
+        return hit
+
     try:
-        A = load_cloud(cid, str(fa[0]), fa[3])
-        B = load_cloud(cid, str(fb[0]), fb[3])
+        A = _get(str(fa[0]), fa[3])
+        B = _get(str(fb[0]), fb[3])
     except Exception:
         return None
     pa = A @ fa[2].T + fa[1]
@@ -247,7 +258,13 @@ def _pose_shift(pa: np.ndarray, pb: np.ndarray, direction: np.ndarray):
     return float(SHIFT_GRID[best]), float(rel), float(losses[mid])
 
 
-def _pc_at_centers(cid: str, valid: list, centers: list[int], gap: int = PAIR_GAP) -> list[float]:
+def _pc_at_centers(
+    cid: str,
+    valid: list,
+    centers: list[int],
+    gap: int = PAIR_GAP,
+    cloud_cache: dict | None = None,
+) -> list[float]:
     n = len(valid)
     vals = []
     for c in centers:
@@ -255,13 +272,19 @@ def _pc_at_centers(cid: str, valid: list, centers: list[int], gap: int = PAIR_GA
         b = min(n - 1, c + gap)
         if b - a < gap:
             continue
-        row = _pair_cloud(cid, valid, a, b)
+        row = _pair_cloud(cid, valid, a, b, cloud_cache=cloud_cache)
         if row is not None:
             vals.append(row[2])
     return vals
 
 
-def _uniform_shift_search(cid: str, valid: list, gap: int = PAIR_GAP, n_pairs: int = N_SHIFT_PAIRS):
+def _uniform_shift_search(
+    cid: str,
+    valid: list,
+    gap: int = PAIR_GAP,
+    n_pairs: int = N_SHIFT_PAIRS,
+    cloud_cache: dict | None = None,
+):
     n = len(valid)
     if n <= gap + 2:
         return None
@@ -269,7 +292,7 @@ def _uniform_shift_search(cid: str, valid: list, gap: int = PAIR_GAP, n_pairs: i
     pcs, shifts, rels, signs = [], [], [], []
     for a in starts:
         b = int(a) + gap
-        row = _pair_cloud(cid, valid, int(a), b)
+        row = _pair_cloud(cid, valid, int(a), b, cloud_cache=cloud_cache)
         if row is None:
             continue
         pa, pb, pc, ta, tb = row
@@ -462,8 +485,9 @@ def scan_clip(rec: dict) -> dict:
         m["anomaly_centers"] = anom
         m["ref_centers"] = refs
 
-        anom_pcs = _pc_at_centers(cid, valid, anom)
-        ref_pcs = _pc_at_centers(cid, valid, refs)
+        cloud_cache: dict = {}
+        anom_pcs = _pc_at_centers(cid, valid, anom, cloud_cache=cloud_cache)
+        ref_pcs = _pc_at_centers(cid, valid, refs, cloud_cache=cloud_cache)
         m["max_anom_pc"] = round(float(np.max(anom_pcs)), 3) if anom_pcs else None
         m["med_anom_pc"] = round(float(np.median(anom_pcs)), 3) if anom_pcs else None
         m["med_ref_pc"] = round(float(np.median(ref_pcs)), 3) if ref_pcs else None
@@ -476,7 +500,7 @@ def scan_clip(rec: dict) -> dict:
             m["max_anom_pc"] is None or m["max_anom_pc"] < HIGH_PC
         )
         if need_shift:
-            sh = _uniform_shift_search(cid, valid)
+            sh = _uniform_shift_search(cid, valid, cloud_cache=cloud_cache)
             if sh:
                 m.update({
                     "med_shift": round(sh["med_shift"], 3),

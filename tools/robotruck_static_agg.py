@@ -223,6 +223,7 @@ def load_or_build_static_aggregate(
 ) -> dict:
     """Return dict with xyz_map, labels, lidar_ids (map frame), meta."""
     fingerprint_rows = []
+    fingerprint_metas: dict[str, dict] = {}
     for ts in timestamps:
         frame = clip_dir / "frames" / ts
         meta_path = frame / "frame.json"
@@ -230,6 +231,7 @@ def load_or_build_static_aggregate(
         if not meta_path.is_file():
             continue
         meta = json.loads(meta_path.read_text())
+        fingerprint_metas[ts] = meta
         deskew = (((meta.get("dependency") or {}).get("sensors") or {}).get("lidar_merge_deskew") or {})
         fingerprint_rows.append({
             "timestamp": ts,
@@ -269,7 +271,12 @@ def load_or_build_static_aggregate(
         lidar_path = fr / "lidar_merge.bin"
         if not lidar_path.is_file():
             continue
-        meta = json.loads((fr / "frame.json").read_text())
+        meta = fingerprint_metas.get(ts)
+        if meta is None:
+            meta_path = fr / "frame.json"
+            if not meta_path.is_file():
+                continue
+            meta = json.loads(meta_path.read_text())
         deskew = (((meta.get("dependency") or {}).get("sensors") or {}).get("lidar_merge_deskew") or {})
         if require_deskew and not deskew.get("md5"):
             raise ValueError(f"{ts}: lidar_merge_deskew metadata is missing")
