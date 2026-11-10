@@ -149,7 +149,7 @@ def store(path: Path, asset_root: Path) -> dict:
         "length": target.stat().st_size, "sha256": digest,
     }
 
-def upload_group(scene: Path, group: dict | None, asset_root: Path):
+def upload_group(scene: Path, group: dict | None, asset_root: Path, *, publish=None):
     if group is None:
         return None
     output = {}
@@ -162,8 +162,59 @@ def upload_group(scene: Path, group: dict | None, asset_root: Path):
         if not path.is_file():
             raise FileNotFoundError(path)
         output[name] = {k: v for k, v in ref.items() if k != "uri"}
-        output[name].update(store(path, asset_root))
+        output[name].update(publish(path) if publish else store(path, asset_root))
     return output
+
+def gridfs_publisher(db, bucket_name: str):
+    from gridfs import GridFSBucket
+    if not re.fullmatch(r"[\w-]+", bucket_name):
+        raise ValueError("invalid GridFS bucket name")
+    bucket = GridFSBucket(db, bucket_name=bucket_name)
+    def publish(path):
+        digest = sha256(path)
+        existing = db[f"{bucket_name}.files"].find_one({"metadata.sha256": digest})
+        if existing:
+            if existing["length"] != path.stat().st_size:
+                raise ValueError("GridFS digest/length conflict")
+            identifier = existing["_id"]
+        else:
+            with path.open("rb") as stream:
+                identifier = bucket.upload_from_stream(path.name, stream, metadata={"sha256": digest})
+        return {"storage": "gridfs", "bucket": bucket_name, "gridfs_id": str(identifier),
+                "sha256": digest, "length": path.stat().st_size, "filename": path.name}
+    return publish
+
+def validate_camera_assets(meta, raw_cameras):
+    import numpy as np
+    cameras = (meta.get("assets") or {}).get("cameras") or []
+    if raw_cameras and not cameras:
+        raise ValueError("Scene has no calibrated cameras; re-export with current camera names")
+    for camera in cameras:
+        if (len(camera.get("K", [])) != 9 or len(camera.get("T_c_v_lidar_ref", [])) != 16
+                or not camera.get("image", {}).get("uri")):
+            raise ValueError(f"incomplete camera calibration: {camera.get('name')}")
+        if not np.isfinite(camera['K']).all() or not np.isfinite(camera['T_c_v_lidar_ref']).all():
+            raise ValueError(f"non-finite camera calibration: {camera.get('name')}")
+    return cameras
+
+def validate_scene_assets(scene, value):
+    """Check every referenced file before the first Mongo/blob write."""
+    import numpy as np
+    if isinstance(value, list):
+        for child in value:
+            validate_scene_assets(scene, child)
+    elif isinstance(value, dict):
+        if 'uri' in value:
+            path = (scene / value['uri']).resolve()
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            if 'dtype' in value and 'shape' in value:
+                expected = int(np.prod(value['shape'])) * np.dtype(value['dtype']).itemsize
+                if path.stat().st_size != expected:
+                    raise ValueError(f"asset shape/length mismatch: {path}")
+        else:
+            for child in value.values():
+                validate_scene_assets(scene, child)
 
 def raw_cameras(raw: dict) -> list[dict]:
     sensors = ((raw.get("dependency") or {}).get("sensors") or {})
@@ -184,6 +235,8 @@ def run(
     scene: str | Path,
     raw_frame_collection: str,
     raw_clip_collection: str = "",
+    occ_frame_collection: str = "",
+    occ_clip_collection: str = "",
     database: str = "perception_experiment",
     mongo_uri: str = DEFAULT_URI,
     asset_root: str | Path = DEFAULT_ASSET_ROOT,
@@ -191,13 +244,22 @@ def run(
     backup_root: str | Path = "data/robotruck_clips_backup",
     resume: bool = False,
     write: bool = False,
+    split_tag: str = "",
+    asset_storage: str = "file",
+    gridfs_bucket: str = "occ_blobs",
 ) -> int:
+    if asset_storage not in ("file", "gridfs"):
+        raise ValueError("asset_storage must be file or gridfs")
+    if split_tag not in ("", "train", "val"):
+        raise ValueError("split_tag must be train or val")
     scene = Path(scene).resolve()
     asset_root = Path(asset_root)
     index = load_json(scene / "index.json")
     raw_clip_name = raw_clip_collection or infer_collection(raw_frame_collection, "frames", "clips")
-    occ_frame_name = infer_occ_collection(raw_frame_collection)
-    occ_clip_name = infer_occ_collection(raw_clip_name)
+    occ_frame_name = occ_frame_collection or infer_occ_collection(raw_frame_collection)
+    occ_clip_name = occ_clip_collection or infer_occ_collection(raw_clip_name)
+    if len({raw_frame_collection, raw_clip_name, occ_frame_name, occ_clip_name}) != 4:
+        raise ValueError("raw and OCC frame/clip collections must all be distinct")
     backup = (ROOT / backup_root / scene.name).resolve()
     client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
     client.admin.command("ping")
@@ -217,6 +279,8 @@ def run(
         clip_ids.add(raw.get("clip_id"))
         ts = str(entry.get("timestamp") or entry.get("frame_id"))
         meta = load_json(scene / (entry.get("meta_uri") or f"frames/{ts}/meta.json"))
+        validate_camera_assets(meta, cameras)
+        validate_scene_assets(scene, meta.get('assets') or {})
         prepared.append((entry, raw, meta, lidar_path, cameras))
     if len(clip_ids) != 1:
         raise RuntimeError(f"expected one raw clip, got {clip_ids}")
@@ -224,18 +288,21 @@ def run(
     raw_clip = raw_clips.find_one({"clip_id": clip_id})
     if raw_clip is None:
         raise RuntimeError(f"raw clip {clip_id} absent from {raw_clip_name}")
+    validate_scene_assets(scene, index.get('static_agg'))
 
     print(json.dumps({
-        "mode": "write-content-addressed" if write else "dry-run", "scene": str(scene),
+        "mode": f"write-{asset_storage}" if write else "dry-run", "scene": str(scene),
         "frames": len(prepared), "raw_roots": [str(p) for p in RAW_ROOTS],
         "raw": {"frames": raw_frame_collection, "clips": raw_clip_name, "clip_id": clip_id},
         "occ": {"frames": occ_frame_name, "clips": occ_clip_name,
-                "asset_root": str(asset_root.resolve())},
+                "asset_storage": asset_storage, "gridfs_bucket": gridfs_bucket,
+                "asset_root": str(asset_root.resolve()) if asset_storage == 'file' else None},
     }, default=str, indent=2), flush=True)
     if not write:
         return 0
 
     create_indexes(occ_frames, occ_clips)
+    publish = gridfs_publisher(db, gridfs_bucket) if asset_storage == "gridfs" else None
     now = utc_now()
     for number, (entry, raw, meta, lidar_path, cameras) in enumerate(prepared, 1):
         md5 = raw_lidar_md5(raw) or raw["md5"]
@@ -254,16 +321,21 @@ def run(
             "frame_md5": md5, "clip_id": clip_id,
         }
         current = meta.get("assets") or {}
+        calibrated_cameras = []
+        for camera in validate_camera_assets(meta, cameras):
+            calibrated_cameras.append({**camera, "image": upload_group(
+                scene, {"image": camera["image"]}, asset_root, publish=publish)["image"]})
         assets = {
-            "occupancy": upload_group(scene, current.get("occupancy"), asset_root),
-            "points": upload_group(scene, current.get("points"), asset_root),
-            "cameras": cameras,
+            "occupancy": upload_group(scene, current.get("occupancy"), asset_root, publish=publish),
+            "points": upload_group(scene, current.get("points"), asset_root, publish=publish),
+            "frame_sensor_points": upload_group(scene, current.get("frame_sensor_points"), asset_root, publish=publish),
+            "cameras": calibrated_cameras,
         }
         doc = {
             "schema_version": "litept_occ_frame/v2", "md5": md5,
             "timestamp": raw.get("timestamp", entry.get("timestamp")), "clip_id": clip_id,
             "bag_name": raw.get("bag_name"),
-            "tag": sorted(set((raw.get("tag") or []) + ["litept", "occ", "semseg"])),
+            "tag": [split_tag] if split_tag else sorted(set((raw.get("tag") or []) + ["litept", "occ", "semseg"])),
             "source": source,
             "raw_assets": {"lidar_merge": {"md5": md5, "uri": str(lidar_path)}, "cameras": cameras},
             "model": {"name": "litept-small-waymo-semseg", "version": model_version, "taxonomy": "waymo-22"},
@@ -282,13 +354,13 @@ def run(
         if number % 10 == 0 or number == len(prepared):
             print(f"uploaded {number}/{len(prepared)}", flush=True)
 
-    static = upload_group(scene, index.get("static_agg"), asset_root)
+    static = upload_group(scene, index.get("static_agg"), asset_root, publish=publish)
     timestamps = [raw.get("timestamp") for _, raw, _, _, _ in prepared]
     clip_doc = {
         "schema_version": "litept_occ_clip/v2", "clip_id": clip_id,
         "clip_name": raw_clip.get("clip_name"), "bag_name": raw_clip.get("bag_name"),
         "bag_path": raw_clip.get("bag_path"),
-        "tag": sorted(set((raw_clip.get("tag") or []) + ["litept", "occ"])),
+        "tag": [split_tag] if split_tag else sorted(set((raw_clip.get("tag") or []) + ["litept", "occ"])),
         "source": {
             "db": database, "clip_collection": raw_clip_name,
             "frame_collection": raw_frame_collection,
@@ -314,9 +386,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--scene", required=True)
     ap.add_argument("--raw-frame-collection", required=True)
     ap.add_argument("--raw-clip-collection", default="")
+    ap.add_argument("--occ-frame-collection", default="")
+    ap.add_argument("--occ-clip-collection", default="")
     ap.add_argument("--database", default="perception_experiment")
     ap.add_argument("--mongo-uri", default=DEFAULT_URI)
     ap.add_argument("--asset-root", type=Path, default=DEFAULT_ASSET_ROOT)
+    ap.add_argument("--asset-storage", choices=("file", "gridfs"), default="file")
+    ap.add_argument("--gridfs-bucket", default="occ_blobs")
+    ap.add_argument("--split-tag", choices=("train", "val"), default="")
     ap.add_argument("--model-version", default="v1")
     ap.add_argument("--backup-root", default="data/robotruck_clips_backup")
     ap.add_argument("--resume", action="store_true")
@@ -326,9 +403,14 @@ def main(argv: list[str] | None = None) -> int:
         scene=args.scene,
         raw_frame_collection=args.raw_frame_collection,
         raw_clip_collection=args.raw_clip_collection,
+        occ_frame_collection=args.occ_frame_collection,
+        occ_clip_collection=args.occ_clip_collection,
         database=args.database,
         mongo_uri=args.mongo_uri,
         asset_root=args.asset_root,
+        asset_storage=args.asset_storage,
+        gridfs_bucket=args.gridfs_bucket,
+        split_tag=args.split_tag,
         model_version=args.model_version,
         backup_root=args.backup_root,
         resume=args.resume,

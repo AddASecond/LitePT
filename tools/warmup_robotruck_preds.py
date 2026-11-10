@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--agg-stride", type=int, default=2)
     ap.add_argument("--stride", type=int, default=4)
     ap.add_argument("--max-frames", type=int, default=8)
+    ap.add_argument("--timestamps", nargs="+", help="Exact export/aggregation timestamps; overrides stride selection")
     ap.add_argument("--config-file", default="configs/waymo/semseg-litept-small-v1m1.py")
     ap.add_argument(
         "--weight",
@@ -54,6 +55,11 @@ def main(argv: list[str] | None = None) -> int:
             tss[:: max(1, args.agg_stride)] + tss[:: max(1, args.stride)][: args.max_frames]
         )
     )
+    if args.timestamps is not None:
+        unknown = set(args.timestamps) - set(tss)
+        if unknown:
+            raise ValueError(f"requested timestamps absent from clip: {sorted(unknown)}")
+        need = list(dict.fromkeys(args.timestamps))
 
     pred_dir = Path(args.pred_dir)
     pred_dir.mkdir(parents=True, exist_ok=True)

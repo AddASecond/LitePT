@@ -8,6 +8,7 @@ import argparse
 import bisect
 import json
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,18 +26,17 @@ import quality_gate as qgate
 import static_agg as sag
 import visualize as vis
 
-CAM_ORDER = [
-    "camera1",
-    "camera2",
-    "camera3",
-    "camera4",
-    "camera5",
-    "camera6",
-    "camera7",
-    "camera8",
-    "camera9",
-    "camera17",
-]
+def camera_names(sensors: dict) -> list[str]:
+    """One image/calibration pair per camera; prefer rectified modern inputs."""
+    candidates = {}
+    priority = {"undistort": 0, None: 1, "raw": 2}
+    for name, sensor in sensors.items():
+        match = re.fullmatch(r"camera(\d+)(?:_(raw|undistort))?", name)
+        if not match or not isinstance(sensor, dict):
+            continue
+        number, variant = match.groups()
+        candidates.setdefault(int(number), []).append((priority[variant], name))
+    return [min(candidates[number])[1] for number in sorted(candidates)]
 
 def list_clip_frames(clip_dir: Path) -> list[str]:
     idx_path = clip_dir / "frames_index.json"
@@ -50,9 +50,14 @@ def list_clip_frames(clip_dir: Path) -> list[str]:
     ]
 
 def parse_camera(cam_doc: dict):
+    model = cam_doc['intrinsic'].get('meta', {}).get('camera_model', 'pinhole')
+    if model != 'pinhole':
+        raise ValueError(f"Viewer requires a pinhole image; use an undistort camera instead of {model}")
     # Defensive reshape: intrinsic / extrinsic may be stored as flat lists.
     K = np.asarray(cam_doc["intrinsic"]["intrinsic"], dtype=np.float64).reshape(3, 3)
     dist = np.asarray(cam_doc["intrinsic"]["distortion"], dtype=np.float64).reshape(-1)
+    if dist.size > 5 and np.any(dist[5:] != 0):
+        raise ValueError("Viewer dist5 cannot represent rational distortion; use the matching undistort camera")
     dist5 = np.zeros(5, dtype=np.float64)
     dist5[: min(5, dist.size)] = dist[:5]
     # T_v_c = camera pose in vehicle (p_veh = T_v_c · p_cam).
@@ -223,7 +228,7 @@ def export_frame(
         (sensors.get("lidar_merge_deskew") or {}).get("timestamp") or ts
     )
     T_map_v_lidar = interpolate_pose_matrix(pose_samples, lidar_timestamp)
-    for cam_name in CAM_ORDER:
+    for cam_name in camera_names(sensors):
         img_path = fr / f"{cam_name}.jpg"
         if not img_path.is_file() or cam_name not in sensors:
             continue
@@ -253,6 +258,8 @@ def export_frame(
         cameras_meta.append(
             {
                 "name": cam_name,
+                "md5": cam_doc.get("md5"),
+                "timestamp": camera_timestamp,
                 # legacy relative-to-frame path (viewer fallback)
                 "file": f"cameras/{cam_name}.jpg",
                 "width": iw,

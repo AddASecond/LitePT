@@ -100,8 +100,15 @@ def ensure_preds(
         "--max-frames", str(max_frames if max_frames > 0 else max(len(timestamps), 1)),
         "--config-file", config_file, "--weight", weight,
         "--grid-size", str(grid_size), "--mode", "infer",
+        "--timestamps", *need,
     ]
     print(f"[ensure_preds] missing={len(missing)} -> A CLI", flush=True)
     proc = subprocess.run(cmd, cwd=str(ROOT), env=os.environ.copy())
     if proc.returncode != 0:
         raise RuntimeError(f"A warmup CLI failed rc={proc.returncode}")
+    for ts in missing:
+        pred = pred_dir / f"{ts}_pred.npy"
+        lidar = clip_dir / "frames" / ts / "lidar_merge.bin"
+        expected = lidar.stat().st_size // (4 * len(LIDAR_COLS))
+        if not pred.is_file() or np.load(pred).shape != (expected,):
+            raise RuntimeError(f"A warmup CLI did not produce aligned predictions for {ts}")

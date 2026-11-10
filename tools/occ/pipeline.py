@@ -135,12 +135,17 @@ def run(
     raw_frame_collection: str,
     clip_id: str,
     raw_clip_collection: str = "",
+    occ_frame_collection: str = "",
+    occ_clip_collection: str = "",
     scene_name: str = "",
     database: str = "perception_experiment",
     mongo_uri: str = DEFAULT_URI,
     cache_root: str = "exp/robotruck/raw_volume_cache",
     scene_root: str = "exp/robotruck/occ_scenes",
     asset_root: str = "/data/rawdata-4/occupancy",
+    asset_storage: str = "file",
+    gridfs_bucket: str = "occ_blobs",
+    split_tag: str = "",
     stride: int = 1,
     max_frames: int = 0,
     force_infer: bool = False,
@@ -174,8 +179,15 @@ def run(
         scene=scene,
         raw_frame_collection=raw_frame_collection,
         raw_clip_collection=raw_clip_collection,
+        occ_frame_collection=occ_frame_collection,
+        occ_clip_collection=occ_clip_collection,
+        database=database,
+        mongo_uri=mongo_uri,
         backup_root=cache_root,
         asset_root=asset_root,
+        asset_storage=asset_storage,
+        gridfs_bucket=gridfs_bucket,
+        split_tag=split_tag,
         write=write,
     )
 
@@ -183,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--raw-frame-collection", required=True)
     ap.add_argument("--raw-clip-collection", default="")
+    ap.add_argument("--occ-frame-collection", default="")
+    ap.add_argument("--occ-clip-collection", default="")
     ap.add_argument("--clip-id", required=True)
     ap.add_argument("--scene-name", default="")
     ap.add_argument("--database", default="perception_experiment")
@@ -190,6 +204,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cache-root", default="exp/robotruck/raw_volume_cache")
     ap.add_argument("--scene-root", default="exp/robotruck/occ_scenes")
     ap.add_argument("--asset-root", default="/data/rawdata-4/occupancy")
+    ap.add_argument("--asset-storage", choices=("file", "gridfs"), default="file")
+    ap.add_argument("--gridfs-bucket", default="occ_blobs")
+    ap.add_argument("--split-tag", choices=("train", "val"), default="")
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--force-infer", action="store_true")
@@ -198,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
     return run(
         raw_frame_collection=args.raw_frame_collection,
         raw_clip_collection=args.raw_clip_collection,
+        occ_frame_collection=args.occ_frame_collection,
+        occ_clip_collection=args.occ_clip_collection,
         clip_id=args.clip_id,
         scene_name=args.scene_name,
         database=args.database,
@@ -205,6 +224,9 @@ def main(argv: list[str] | None = None) -> int:
         cache_root=args.cache_root,
         scene_root=args.scene_root,
         asset_root=args.asset_root,
+        asset_storage=args.asset_storage,
+        gridfs_bucket=args.gridfs_bucket,
+        split_tag=args.split_tag,
         stride=args.stride,
         max_frames=args.max_frames,
         force_infer=args.force_infer,
