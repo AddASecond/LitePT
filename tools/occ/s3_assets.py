@@ -14,7 +14,8 @@ def s3_publisher(bucket, prefix, mount_root, *, profile=None, client=None):
         import boto3
         from botocore.config import Config
         client = boto3.Session(profile_name=profile).client('s3', config=Config(
-            connect_timeout=10, read_timeout=120, retries={'mode': 'standard', 'max_attempts': 5}))
+            connect_timeout=10, read_timeout=120, max_pool_connections=32,
+            retries={'mode': 'standard', 'max_attempts': 5}))
     from botocore.exceptions import ClientError
     uploaded = {}
 

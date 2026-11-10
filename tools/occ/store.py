@@ -342,7 +342,7 @@ def run(
         paths = sorted(set(paths_in([meta['assets'] for _, _, meta, _, _ in prepared]
                                     + [index.get('static_agg')])))
         references = {}
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=32) as pool:
             for number, (path, reference) in enumerate(zip(paths, pool.map(publish, paths)), 1):
                 references[path] = reference
                 if number % 500 == 0 or number == len(paths):
