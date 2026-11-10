@@ -5,7 +5,6 @@ python tools/occ/export_scene.py --clip <name> --stride 2 --max-frames 3 --reuse
 from __future__ import annotations
 
 import argparse
-import bisect
 import json
 import os
 import re
@@ -74,30 +73,7 @@ def pose_stamp_ns(ego: dict) -> int:
 def interpolate_pose_matrix(
     samples: list[tuple[int, dict]], timestamp_ns: int
 ) -> np.ndarray:
-    times = [row[0] for row in samples]
-    hi = bisect.bisect_left(times, int(timestamp_ns))
-    if hi <= 0:
-        return sag.ego_pose_to_T_map_vehicle(samples[0][1])
-    if hi >= len(samples):
-        return sag.ego_pose_to_T_map_vehicle(samples[-1][1])
-    ta, pa = samples[hi - 1]
-    tb, pb = samples[hi]
-    alpha = float(timestamp_ns - ta) / float(tb - ta)
-    qa = np.array([pa["orientation"][k] for k in ("x", "y", "z", "w")], np.float64)
-    qb = np.array([pb["orientation"][k] for k in ("x", "y", "z", "w")], np.float64)
-    if np.dot(qa, qb) < 0:
-        qb = -qb
-    q = (1.0 - alpha) * qa + alpha * qb
-    q /= np.linalg.norm(q)
-    pose = {
-        "position": {
-            k: (1.0 - alpha) * float(pa["position"][k])
-            + alpha * float(pb["position"][k])
-            for k in ("x", "y", "z")
-        },
-        "orientation": dict(zip(("x", "y", "z", "w"), q.tolist())),
-    }
-    return sag.ego_pose_to_T_map_vehicle(pose)
+    return sag.interpolate_pose_matrix(samples, int(timestamp_ns))
 
 def write_f32(path: Path, arr: np.ndarray) -> None:
     path.write_bytes(np.asarray(arr, dtype=np.float32).reshape(-1).tobytes())
@@ -161,6 +137,9 @@ def export_frame(
     fr = clip_dir / "frames" / ts
     meta = json.loads((fr / "frame.json").read_text())
     sensors = meta["dependency"]["sensors"]
+    lidar_timestamp = sag.lidar_reference_timestamp(meta, ts)
+    reference_pose = sag.interpolate_pose(pose_samples, lidar_timestamp)
+    T_map_v_lidar = sag.ego_pose_to_T_map_vehicle(reference_pose)
 
     pts = load_lidar_bin(fr / "lidar_merge.bin")
     coord = pts[:, :3].astype(np.float32)
@@ -191,9 +170,9 @@ def export_frame(
     lid_s = np.zeros((0,), np.int32)
     xyz_s = np.zeros((0, 3), np.float32)
     if static_agg is not None and static_agg["xyz_map"].shape[0] > 0:
-        pose = (meta.get("dependency") or {}).get("ego_pose", {}).get("pose")
+        pose = reference_pose
         if pose:
-            T_map_v = sag.ego_pose_to_T_map_vehicle(pose)
+            T_map_v = T_map_v_lidar
             xyz_s, lab_s, lid_s = sag.static_in_vehicle(
                 static_agg,
                 T_map_v,
@@ -224,10 +203,6 @@ def export_frame(
     cam_dir.mkdir(exist_ok=True)
 
     cameras_meta = []
-    lidar_timestamp = int(
-        (sensors.get("lidar_merge_deskew") or {}).get("timestamp") or ts
-    )
-    T_map_v_lidar = interpolate_pose_matrix(pose_samples, lidar_timestamp)
     for cam_name in camera_names(sensors):
         img_path = fr / f"{cam_name}.jpg"
         if not img_path.is_file() or cam_name not in sensors:
@@ -387,7 +362,7 @@ def export_frame(
             ),
         }
 
-    pose = (meta.get("dependency") or {}).get("ego_pose", {}).get("pose")
+    pose = reference_pose
     origin = [float(x_range[0]), float(y_range[0]), float(z_range[0])]
     frame_meta = {
         "schema_version": "robotruck_occ_frame/v1",
@@ -435,6 +410,8 @@ def export_frame(
             "cameras": cameras_meta,
         },
         "ego_pose": pose,
+        "ego_pose_timestamp_ns": str(lidar_timestamp),
+        "pose_reference": "lidar_timestamp",
         "taxonomy_ref": "index.json#taxonomy",
         # ---- legacy fields (viewer / tools backward compatible) ----
         "voxel": float(grid.voxel),
@@ -543,16 +520,7 @@ def export_one(args) -> int:
     )
 
     all_ts = list_clip_frames(clip_dir)
-    pose_samples: list[tuple[int, dict]] = []
-    for pose_ts in all_ts:
-        pose_meta_path = clip_dir / "frames" / pose_ts / "frame.json"
-        if not pose_meta_path.is_file():
-            continue
-        pose_meta = json.loads(pose_meta_path.read_text())
-        ego = (pose_meta.get("dependency") or {}).get("ego_pose")
-        if ego and ego.get("pose") and ego.get("header", {}).get("stamp"):
-            pose_samples.append((pose_stamp_ns(ego), ego["pose"]))
-    pose_samples.sort(key=lambda row: row[0])
+    pose_samples = sag.load_pose_samples(clip_dir)
     if len(pose_samples) < 2:
         raise ValueError("at least two timestamped ego poses are required")
     if all_ts and args.skip_initial_seconds > 0:
@@ -568,6 +536,7 @@ def export_one(args) -> int:
         sample_frames=args.quality_sample_frames,
         layer_threshold=args.layer_threshold,
         pose_shift_threshold=args.pose_shift_threshold,
+        pose_samples=pose_samples,
     )
     if args.geometry_quality_gate and not geometry_quality["allow_occ"]:
         geometry_quality["action"] = "clip_rejected"
@@ -634,6 +603,7 @@ def export_one(args) -> int:
             cache_path=cache_path,
             use_oracle_boxes=True,
             ego_filter=ego_filter,
+            pose_samples=pose_samples,
         )
         print(f"static_agg N={static_agg['xyz_map'].shape[0]}")
         # Mirror static_agg into the scene package (map frame; frames only apply pose).

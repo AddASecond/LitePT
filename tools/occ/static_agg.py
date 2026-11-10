@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import bisect
 import json
 from pathlib import Path
 
@@ -11,6 +12,51 @@ import numpy as np
 WAYMO_DYNAMIC_IDS = frozenset({0, 1, 2, 3, 4, 5, 6, 11, 12})
 WAYMO_STATIC_IDS = frozenset(range(22)) - WAYMO_DYNAMIC_IDS
 WAYMO_GROUND_IDS = frozenset({17, 18, 19, 20, 21})
+
+
+def load_pose_samples(clip_dir: Path) -> list[tuple[int, dict]]:
+    samples = {}
+    for path in sorted((clip_dir / 'frames').glob('*/frame.json')):
+        ego = (json.loads(path.read_text()).get('dependency') or {}).get('ego_pose') or {}
+        stamp = ego.get('header', {}).get('stamp')
+        if stamp and ego.get('pose'):
+            samples[int(stamp['sec']) * 1_000_000_000 + int(stamp['nanosec'])] = ego['pose']
+    return sorted(samples.items())
+
+
+def interpolate_pose(samples: list[tuple[int, dict]], timestamp_ns: int) -> dict:
+    """Pose at a sensor reference time; integer-ns bracketing avoids epoch rounding."""
+    if len(samples) < 2:
+        raise ValueError('at least two timestamped ego poses are required')
+    times = [row[0] for row in samples]
+    hi = bisect.bisect_left(times, timestamp_ns)
+    if hi <= 0:
+        return samples[0][1]
+    if hi >= len(samples):
+        return samples[-1][1]
+    ta, pa = samples[hi - 1]
+    tb, pb = samples[hi]
+    alpha = float(timestamp_ns - ta) / float(tb - ta)
+    qa = np.array([pa['orientation'][k] for k in ('x', 'y', 'z', 'w')], np.float64)
+    qb = np.array([pb['orientation'][k] for k in ('x', 'y', 'z', 'w')], np.float64)
+    if np.dot(qa, qb) < 0:
+        qb = -qb
+    q = (1.0 - alpha) * qa + alpha * qb
+    q /= np.linalg.norm(q)
+    return {
+        'position': {k: (1.0 - alpha) * float(pa['position'][k]) + alpha * float(pb['position'][k])
+                     for k in ('x', 'y', 'z')},
+        'orientation': dict(zip(('x', 'y', 'z', 'w'), q.tolist())),
+    }
+
+
+def interpolate_pose_matrix(samples: list[tuple[int, dict]], timestamp_ns: int) -> np.ndarray:
+    return ego_pose_to_T_map_vehicle(interpolate_pose(samples, timestamp_ns))
+
+
+def lidar_reference_timestamp(meta: dict, fallback=None) -> int:
+    sensor = ((meta.get('dependency') or {}).get('sensors') or {}).get('lidar_merge_deskew') or {}
+    return int(sensor.get('timestamp') or meta.get('timestamp') or fallback)
 
 
 def ground_aware_ego_keep_mask(xyz: np.ndarray, labels: np.ndarray, config: dict | None) -> tuple[np.ndarray, dict]:
@@ -199,9 +245,11 @@ def load_or_build_static_aggregate(
     seed: int = 0,
     ego_filter: dict | None = None,
     require_deskew: bool = True,
+    pose_samples: list[tuple[int, dict]] | None = None,
 ) -> dict:
     """Return dict with xyz_map, labels, lidar_ids (map frame), meta."""
     fingerprint_rows = []
+    pose_samples = load_pose_samples(clip_dir) if pose_samples is None else pose_samples
     fingerprint_metas: dict[str, dict] = {}
     for ts in timestamps:
         frame = clip_dir / "frames" / ts
@@ -214,6 +262,7 @@ def load_or_build_static_aggregate(
         deskew = (((meta.get("dependency") or {}).get("sensors") or {}).get("lidar_merge_deskew") or {})
         fingerprint_rows.append({
             "timestamp": ts,
+            "lidar_reference_timestamp_ns": lidar_reference_timestamp(meta, ts),
             "deskew_md5": deskew.get("md5"),
             "pose": ((meta.get("dependency") or {}).get("ego_pose") or {}).get("pose"),
             "od_source": (((meta.get("groundtruth") or {}).get("lidar_od_prelabel") or {}).get("source_version")),
@@ -221,7 +270,8 @@ def load_or_build_static_aggregate(
             "pred_mtime_ns": pred_path.stat().st_mtime_ns if pred_path.is_file() else None,
         })
     expected_fingerprint = hashlib.sha256(json.dumps({
-        "schema": "static_aggregate/v2", "frames": fingerprint_rows,
+        "schema": "static_aggregate/v3", "frames": fingerprint_rows,
+        "pose_reference": "lidar_timestamp", "pose_samples": pose_samples,
         "voxel": voxel, "grid_size": grid_size, "ego_filter": ego_filter or {},
         "use_oracle_boxes": use_oracle_boxes, "require_deskew": require_deskew,
     }, sort_keys=True).encode()).hexdigest()
@@ -259,10 +309,7 @@ def load_or_build_static_aggregate(
         deskew = (((meta.get("dependency") or {}).get("sensors") or {}).get("lidar_merge_deskew") or {})
         if require_deskew and not deskew.get("md5"):
             raise ValueError(f"{ts}: lidar_merge_deskew metadata is missing")
-        pose = (meta.get("dependency") or {}).get("ego_pose", {}).get("pose")
-        if not pose:
-            continue
-        T_map_v = ego_pose_to_T_map_vehicle(pose)
+        T_map_v = interpolate_pose_matrix(pose_samples, lidar_reference_timestamp(meta, ts))
 
         pts = load_lidar_bin(lidar_path, num_cols=lidar_cols)
         coord = pts[:, :3].astype(np.float32)

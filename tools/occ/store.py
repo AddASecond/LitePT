@@ -216,6 +216,19 @@ def validate_scene_assets(scene, value):
             for child in value.values():
                 validate_scene_assets(scene, child)
 
+
+def published_ego_pose(meta, raw):
+    from static_agg import lidar_reference_timestamp
+    if (meta.get('pose_reference') != 'lidar_timestamp'
+            or meta.get('ego_pose_timestamp_ns') != str(lidar_reference_timestamp(raw))):
+        raise ValueError('Scene ego pose is not at the LiDAR reference time; re-export before publishing')
+    pose = meta.get('ego_pose')
+    if not pose or 'position' not in pose or 'orientation' not in pose:
+        raise ValueError('Scene reference ego pose is missing')
+    ts = int(meta['ego_pose_timestamp_ns'])
+    return {'header': {'stamp': {'sec': ts // 1_000_000_000, 'nanosec': ts % 1_000_000_000},
+                       'frame_id': 'map'}, 'pose': pose}
+
 def raw_cameras(raw: dict) -> list[dict]:
     sensors = ((raw.get("dependency") or {}).get("sensors") or {})
     output = []
@@ -280,6 +293,7 @@ def run(
         ts = str(entry.get("timestamp") or entry.get("frame_id"))
         meta = load_json(scene / (entry.get("meta_uri") or f"frames/{ts}/meta.json"))
         validate_camera_assets(meta, cameras)
+        published_ego_pose(meta, raw)
         validate_scene_assets(scene, meta.get('assets') or {})
         prepared.append((entry, raw, meta, lidar_path, cameras))
     if len(clip_ids) != 1:
@@ -340,11 +354,14 @@ def run(
             "raw_assets": {"lidar_merge": {"md5": md5, "uri": str(lidar_path)}, "cameras": cameras},
             "model": {"name": "litept-small-waymo-semseg", "version": model_version, "taxonomy": "waymo-22"},
             "coordinate": meta.get("coordinate"), "grid": meta.get("grid"), "stats": meta.get("stats"),
-            "assets": assets, "ego_pose": ((raw.get("dependency") or {}).get("ego_pose")),
+            "assets": assets, "ego_pose": published_ego_pose(meta, raw),
+            "pose_reference": meta['pose_reference'],
+            "ego_pose_timestamp_ns": meta['ego_pose_timestamp_ns'],
             "provenance": {
                 "intermediate_scene": str(scene),
                 "scene_schema_version": index.get("schema_version"),
                 "geometry_quality": index.get("geometry_quality", index.get("pose_quality")),
+                "source_ego_pose": ((raw.get('dependency') or {}).get('ego_pose')),
             },
             "updated_at": now,
         }

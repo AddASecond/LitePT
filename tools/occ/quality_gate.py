@@ -58,7 +58,7 @@ def _layer_score(points: np.ndarray, min_overlap: int) -> dict:
         "pairwise": pairwise,
     }
 
-def _structural_map(points: np.ndarray, meta: dict, voxel: float, max_points: int) -> np.ndarray:
+def _structural_map(points: np.ndarray, meta: dict, voxel: float, max_points: int, pose_matrix=None) -> np.ndarray:
     xyz = points[:, :3]
     keep = (
         (xyz[:, 0] > -25) & (xyz[:, 0] < 25)
@@ -76,7 +76,7 @@ def _structural_map(points: np.ndarray, meta: dict, voxel: float, max_points: in
     pose = ((meta.get("dependency") or {}).get("ego_pose") or {}).get("pose")
     if not pose:
         raise ValueError("dependency.ego_pose.pose is missing")
-    return sag.transform_points(xyz, sag.ego_pose_to_T_map_vehicle(pose)).astype(np.float64)
+    return sag.transform_points(xyz, sag.ego_pose_to_T_map_vehicle(pose) if pose_matrix is None else pose_matrix).astype(np.float64)
 
 def _trimmed_loss(tree: cKDTree, points: np.ndarray, max_distance: float) -> float:
     distance = tree.query(points, workers=-1)[0]
@@ -101,11 +101,13 @@ def assess_clip_geometry(
     pose_min_relative_improvement: float = 0.05,
     pose_max_best_loss: float = 0.18,
     pose_max_layer_score: float = 0.01,
+    pose_samples=None,
 ) -> dict:
     """Reject only strongly corroborated layering or pose-alignment failures."""
     if len(timestamps) < 3:
         return {"allow_occ": False, "reasons": ["insufficient_frames"], "warnings": []}
     frame_cache: dict[str, tuple[np.ndarray, dict]] = {}
+    pose_samples = sag.load_pose_samples(clip_dir) if pose_samples is None else pose_samples
 
     def load_cached(timestamp: str) -> tuple[np.ndarray, dict]:
         hit = frame_cache.get(timestamp)
@@ -145,10 +147,12 @@ def assess_clip_geometry(
     for index, next_index in pose_pairs:
         first_points, first_meta = load_cached(timestamps[index])
         next_points, next_meta = load_cached(timestamps[next_index])
-        first_map = _structural_map(first_points, first_meta, 0.4, 8000)
-        next_map = _structural_map(next_points, next_meta, 0.4, 8000)
-        p0 = sag.ego_pose_to_T_map_vehicle(first_meta["dependency"]["ego_pose"]["pose"])[:3, 3]
-        p1 = sag.ego_pose_to_T_map_vehicle(next_meta["dependency"]["ego_pose"]["pose"])[:3, 3]
+        first_pose = sag.interpolate_pose_matrix(pose_samples, sag.lidar_reference_timestamp(first_meta, timestamps[index]))
+        next_pose = sag.interpolate_pose_matrix(pose_samples, sag.lidar_reference_timestamp(next_meta, timestamps[next_index]))
+        first_map = _structural_map(first_points, first_meta, 0.4, 8000, first_pose)
+        next_map = _structural_map(next_points, next_meta, 0.4, 8000, next_pose)
+        p0 = first_pose[:3, 3]
+        p1 = next_pose[:3, 3]
         direction = p1 - p0
         direction /= max(1e-9, np.linalg.norm(direction))
         tree = cKDTree(first_map)
