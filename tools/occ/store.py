@@ -260,9 +260,15 @@ def run(
     split_tag: str = "",
     asset_storage: str = "file",
     gridfs_bucket: str = "occ_blobs",
+    s3_bucket: str = "",
+    s3_prefix: str = "occ_assets",
+    s3_mount_root: str = "",
+    s3_profile: str | None = None,
 ) -> int:
-    if asset_storage not in ("file", "gridfs"):
-        raise ValueError("asset_storage must be file or gridfs")
+    if asset_storage not in ("file", "gridfs", "s3"):
+        raise ValueError("asset_storage must be file, gridfs or s3")
+    if asset_storage == 's3' and (not s3_bucket or not s3_mount_root or not Path(s3_mount_root).is_absolute()):
+        raise ValueError('S3 bucket and absolute consumer mount root are required')
     if split_tag not in ("", "train", "val"):
         raise ValueError("split_tag must be train or val")
     scene = Path(scene).resolve()
@@ -317,6 +323,31 @@ def run(
 
     create_indexes(occ_frames, occ_clips)
     publish = gridfs_publisher(db, gridfs_bucket) if asset_storage == "gridfs" else None
+    if asset_storage == 's3':
+        from s3_assets import s3_publisher
+        publish = s3_publisher(s3_bucket, s3_prefix, s3_mount_root, profile=s3_profile)
+        # Finish remote publication before exposing any frame metadata. Parallel
+        # requests keep per-object latency from dominating a full clip upload.
+        from concurrent.futures import ThreadPoolExecutor
+        def paths_in(value):
+            if isinstance(value, dict):
+                if isinstance(value.get('uri'), str):
+                    yield scene / value['uri']
+                else:
+                    for child in value.values():
+                        yield from paths_in(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from paths_in(child)
+        paths = sorted(set(paths_in([meta['assets'] for _, _, meta, _, _ in prepared]
+                                    + [index.get('static_agg')])))
+        references = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for number, (path, reference) in enumerate(zip(paths, pool.map(publish, paths)), 1):
+                references[path] = reference
+                if number % 500 == 0 or number == len(paths):
+                    print(f'S3 uploaded {number}/{len(paths)}', flush=True)
+        publish = lambda path: dict(references[path])
     now = utc_now()
     for number, (entry, raw, meta, lidar_path, cameras) in enumerate(prepared, 1):
         md5 = raw_lidar_md5(raw) or raw["md5"]

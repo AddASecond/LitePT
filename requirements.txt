@@ -17,3 +17,4 @@ torch-sparse
 torch-geometric==2.5.3
 colorhash
 torchmetrics
+boto3>=1.39.11
