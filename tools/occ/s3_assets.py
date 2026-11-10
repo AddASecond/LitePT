@@ -21,6 +21,7 @@ def s3_publisher(bucket, prefix, mount_root, *, profile=None, client=None):
     def publish(path):
         data = Path(path).read_bytes()
         digest = hashlib.sha256(data).hexdigest()
+        md5 = hashlib.md5(data).digest()
         suffix = ''.join(Path(path).suffixes) or '.bin'
         key = str(PurePosixPath(prefix) / digest[:2] / digest[2:4] / (digest[4:] + suffix))
         if key in uploaded:
@@ -31,12 +32,22 @@ def s3_publisher(bucket, prefix, mount_root, *, profile=None, client=None):
             if error.response['Error']['Code'] not in ('404', 'NoSuchKey', 'NotFound'):
                 raise
             client.put_object(Bucket=bucket, Key=key, Body=data,
-                              ContentMD5=base64.b64encode(hashlib.md5(data).digest()).decode(),
+                              ContentMD5=base64.b64encode(md5).decode(),
                               Metadata={'sha256': digest},
                               ContentType='image/jpeg' if suffix.lower() in ('.jpg', '.jpeg') else 'application/octet-stream')
             head = client.head_object(Bucket=bucket, Key=key)
-        if head['ContentLength'] != len(data) or head.get('Metadata', {}).get('sha256') != digest:
+        remote_sha = head.get('Metadata', {}).get('sha256')
+        if head['ContentLength'] != len(data) or remote_sha not in (None, digest):
             raise ValueError(f'S3 digest/length conflict: {bucket}/{key}')
+        # Some S3 gateways strip user metadata. Single-part SSE-S3 objects have
+        # the content MD5 as ETag; otherwise verify the downloaded SHA-256.
+        if remote_sha is None and head.get('ETag', '').strip('"') != md5.hex():
+            remote_digest = hashlib.sha256()
+            with client.get_object(Bucket=bucket, Key=key)['Body'] as stream:
+                for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b''):
+                    remote_digest.update(chunk)
+            if remote_digest.hexdigest() != digest:
+                raise ValueError(f'S3 digest/length conflict: {bucket}/{key}')
         result = {'storage': 's3', 'bucket': bucket, 'key': key,
                   'uri': str(Path(mount_root) / key), 'sha256': digest, 'length': len(data)}
         uploaded[key] = result

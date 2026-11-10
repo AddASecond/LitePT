@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -48,6 +49,22 @@ class S3AssetTests(unittest.TestCase):
         for prefix, root in [('../escape', '/mnt/data'), ('occ', '')]:
             with self.assertRaises(ValueError):
                 s3_publisher('data', prefix, root, client=MagicMock())
+
+    def test_gateway_without_user_metadata_uses_etag_or_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'array.bin'
+            path.write_bytes(b'1234')
+            client = MagicMock()
+            client.head_object.return_value = {'ContentLength': 4, 'Metadata': {},
+                                               'ETag': '"' + hashlib.md5(b'1234').hexdigest() + '"'}
+            s3_publisher('data', 'occ', '/mnt/data', client=client)(path)
+            client.get_object.assert_not_called()
+            client.head_object.return_value['ETag'] = 'multipart-2'
+            client.get_object.return_value = {'Body': io.BytesIO(b'1234')}
+            s3_publisher('data', 'occ', '/mnt/data', client=client)(path)
+            client.get_object.return_value = {'Body': io.BytesIO(b'bad!')}
+            with self.assertRaisesRegex(ValueError, 'digest/length conflict'):
+                s3_publisher('data', 'occ', '/mnt/data', client=client)(path)
 
 
 if __name__ == '__main__':
