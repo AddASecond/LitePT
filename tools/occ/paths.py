@@ -135,8 +135,13 @@ def ensure_preds(
     if os.environ.get('OCC_PREDICTION_SEED'):
         cmd += ['--seed', os.environ['OCC_PREDICTION_SEED']]
     print(f"[ensure_preds] missing={len(missing)} -> A CLI", flush=True)
+    wait_started = time.monotonic()
     with prediction_slot():
+        run_started = time.monotonic()
         proc = subprocess.run(cmd, cwd=str(ROOT), env=os.environ.copy())
+        run_seconds = time.monotonic() - run_started
+    print(f"[prediction_timing] slot_wait_seconds={run_started - wait_started:.6f} "
+          f"client_run_seconds={run_seconds:.6f}", flush=True)
     if proc.returncode != 0:
         raise RuntimeError(f"A warmup CLI failed rc={proc.returncode}")
     for ts in missing:

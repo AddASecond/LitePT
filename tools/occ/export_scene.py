@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -403,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--scene-prefix", default="", help="scene/cache name = prefix + clip_id")
     ap.add_argument("--backup-root", default="data/robotruck_clips_backup")
     ap.add_argument("--out-dir", default="exp/robotruck/occ_scenes")
+    ap.add_argument("--timings-dir", default="", help="Optional per-clip timing sidecars outside Scene assets")
     ap.add_argument("--pred-dir", default="", help="Default: exp/robotruck/clip_video/<clip>/preds")
     ap.add_argument("--config-file", default="configs/waymo/semseg-litept-small-v1m1.py")
     ap.add_argument(
@@ -461,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
     return rc
 
 def export_one(args) -> int:
+    timings = {}
     clip_dir = (ROOT / args.backup_root / args.clip).resolve()
     if not clip_dir.is_dir():
         raise FileNotFoundError(clip_dir)
@@ -484,6 +487,7 @@ def export_one(args) -> int:
     timestamps = all_ts[:: max(1, args.stride)]
     if args.max_frames > 0:
         timestamps = timestamps[: args.max_frames]
+    stage_started = time.monotonic()
     geometry_quality = qgate.assess_clip_geometry(
         clip_dir,
         all_ts,
@@ -492,6 +496,7 @@ def export_one(args) -> int:
         pose_shift_threshold=args.pose_shift_threshold,
         pose_samples=pose_samples,
     )
+    timings["geometry_quality_seconds"] = time.monotonic() - stage_started
     if args.geometry_quality_gate and not geometry_quality["allow_occ"]:
         geometry_quality["action"] = "clip_rejected"
         raise RuntimeError("GEOMETRY_QUALITY_REJECTED: " + json.dumps(geometry_quality, sort_keys=True))
@@ -521,6 +526,7 @@ def export_one(args) -> int:
             pp = pred_dir / f"{ts}_pred.npy"
             if pp.is_file():
                 pp.unlink()
+    stage_started = time.monotonic()
     ensure_preds(
         clip_dir=clip_dir,
         pred_dir=pred_dir,
@@ -533,7 +539,9 @@ def export_one(args) -> int:
         weight=args.weight,
         grid_size=args.grid_size,
     )
+    timings["prediction_wait_and_run_seconds"] = time.monotonic() - stage_started
 
+    stage_started = time.monotonic()
     static_agg = None
     if args.aggregate_static:
         cache_path = (
@@ -595,6 +603,7 @@ def export_one(args) -> int:
             }
     else:
         index_static_agg = None
+    timings["static_aggregate_seconds"] = time.monotonic() - stage_started
 
     index = {
         "schema_version": "robotruck_occ_scene/v1",
@@ -632,6 +641,7 @@ def export_one(args) -> int:
     }
     if index_static_agg is not None:
         index["static_agg"] = index_static_agg
+    stage_started = time.monotonic()
     with ThreadPoolExecutor(max_workers=max(1, args.camera_workers)) as camera_executor:
         for i, ts in enumerate(timestamps):
             out_frame = scene_root / "frames" / ts
@@ -669,7 +679,12 @@ def export_one(args) -> int:
             )
             print(f"  [{i+1}/{len(timestamps)}] ts={ts} n_occ={info['n_occ']}", flush=True)
 
+    timings["frame_export_seconds"] = time.monotonic() - stage_started
     (scene_root / "index.json").write_text(json.dumps(index, indent=2))
+    if getattr(args, "timings_dir", ""):
+        timing_path = Path(args.timings_dir) / f"{args.clip}.timings.json"
+        timing_path.parent.mkdir(parents=True, exist_ok=True)
+        timing_path.write_text(json.dumps(timings, indent=2))
     print(f"done -> {scene_root}  viewer: cd /home/dev/01develop/occ_viewer && python serve.py --scene {scene_root}")
     return 0
 
