@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -264,6 +265,7 @@ def run(
     s3_prefix: str = "occ_assets",
     s3_mount_root: str = "",
     s3_profile: str | None = None,
+    s3_endpoint: str | None = None,
 ) -> int:
     if asset_storage not in ("file", "gridfs", "s3"):
         raise ValueError("asset_storage must be file, gridfs or s3")
@@ -325,14 +327,23 @@ def run(
     publish = gridfs_publisher(db, gridfs_bucket) if asset_storage == "gridfs" else None
     if asset_storage == 's3':
         from s3_assets import s3_publisher
-        publish = s3_publisher(s3_bucket, s3_prefix, s3_mount_root, profile=s3_profile)
+        publish = s3_publisher(s3_bucket, s3_prefix, s3_mount_root,
+                               profile=s3_profile, endpoint_url=s3_endpoint)
         # Finish remote publication before exposing any frame metadata. Parallel
         # requests keep per-object latency from dominating a full clip upload.
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        camera_sources = {}
+        for _, raw, meta, _, _ in prepared:
+            sensors = raw.get('dependency', {}).get('sensors', {})
+            for camera in meta['assets'].get('cameras', []):
+                md5 = camera.get('md5')
+                if not md5 or md5 != sensors.get(camera['name'], {}).get('md5'):
+                    raise ValueError(f"Scene camera differs from source: {camera['name']}")
+                camera_sources[(scene / camera['image']['uri']).resolve()] = md5
         def paths_in(value):
             if isinstance(value, dict):
                 if isinstance(value.get('uri'), str):
-                    yield scene / value['uri']
+                    yield (scene / value['uri']).resolve()
                 else:
                     for child in value.values():
                         yield from paths_in(child)
@@ -342,11 +353,20 @@ def run(
         paths = sorted(set(paths_in([meta['assets'] for _, _, meta, _, _ in prepared]
                                     + [index.get('static_agg')])))
         references = {}
+        started = time.monotonic()
+        total_bytes = 0
+        reused_cameras = 0
         with ThreadPoolExecutor(max_workers=32) as pool:
-            for number, (path, reference) in enumerate(zip(paths, pool.map(publish, paths)), 1):
+            futures = {pool.submit(publish, path, source_camera_md5=camera_sources.get(path)): path for path in paths}
+            for number, future in enumerate(as_completed(futures), 1):
+                path, reference = futures[future], future.result()
                 references[path] = reference
+                total_bytes += reference['length']
+                reused_cameras += reference['key'].startswith('rawdata/camera/')
                 if number % 500 == 0 or number == len(paths):
-                    print(f'S3 uploaded {number}/{len(paths)}', flush=True)
+                    elapsed = time.monotonic() - started
+                    print(f'S3 published {number}/{len(paths)} elapsed={elapsed:.1f}s '
+                          f'logical_mib={total_bytes / 1024**2:.1f} reused_cameras={reused_cameras}', flush=True)
         publish = lambda path: dict(references[path])
     now = utc_now()
     for number, (entry, raw, meta, lidar_path, cameras) in enumerate(prepared, 1):
