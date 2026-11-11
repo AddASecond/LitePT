@@ -19,8 +19,8 @@ def json_write(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, default=str, ensure_ascii=False, indent=2))
 
-def pcd_binary_to_litept(source: Path, target: Path) -> None:
-    """Convert binary PCD x/y/z/intensity/ring/timestamp/lidar_id to float32 Nx7."""
+def read_binary_pcd(source: Path) -> np.ndarray:
+    """Read native fields without losing integer per-point timestamps."""
     with source.open("rb") as stream:
         header = {}
         while True:
@@ -56,10 +56,21 @@ def pcd_binary_to_litept(source: Path, target: Path) -> None:
     required = ("x", "y", "z")
     if any(name not in data.dtype.names for name in required):
         raise ValueError(f"PCD lacks xyz: {source}")
+    return data
+
+
+def pcd_binary_to_litept(source: Path, target: Path, *, trajectory=None, reference_timestamp=None) -> None:
+    """Convert binary PCD to float32 Nx7, optionally deskewing with the selected pose."""
+    data = read_binary_pcd(source)
+    points = len(data)
     output = np.zeros((points, 7), dtype=np.float32)
     output[:, 0] = data["x"]
     output[:, 1] = data["y"]
     output[:, 2] = data["z"]
+    if trajectory is not None:
+        if 'timestamp' not in data.dtype.names or data.dtype['timestamp'].kind not in 'iu':
+            raise ValueError('Selected-pose deskew requires integer per-point nanoseconds')
+        output[:, :3] = trajectory.deskew(output[:, :3], data['timestamp'], reference_timestamp)
     if "intensity" in data.dtype.names:
         output[:, 3] = data["intensity"]
     if "ring" in data.dtype.names:

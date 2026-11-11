@@ -104,6 +104,7 @@ def export_frame(
     max_export_points: int,
     ego_filter: dict | None,
     pose_samples: list[tuple[int, dict]],
+    geometry: dict | None = None,
 ) -> dict:
     fr = clip_dir / "frames" / ts
     meta = json.loads((fr / "frame.json").read_text())
@@ -193,7 +194,7 @@ def export_frame(
         shutil.copy2(img_path, dst)
         cameras_meta.append(camera_metadata(
             cam_name, cam_doc, (iw, ih), f"frames/{ts}/cameras/{cam_name}.jpg",
-            lidar_timestamp, pose_samples))
+            lidar_timestamp, pose_samples, geometry=geometry))
 
     prefix = f"frames/{ts}"
     write_f32(out_frame / "occ_centers.f32.bin", grid.centers)
@@ -219,7 +220,7 @@ def export_frame(
         n_frame_sensor = int(frame_sensor_xyz.shape[0])
         frame_sensor_points_assets = {
             "n": n_frame_sensor,
-            "source": "lidar_merge_deskew",
+            "source": (geometry or {}).get('point_processing', 'lidar_merge_deskew'),
             "filtering": "none",
             "xyz": asset_ref(
                 f"{prefix}/frame_sensor_points_xyz.f32.bin",
@@ -348,6 +349,7 @@ def export_frame(
         "ego_pose": pose,
         "ego_pose_timestamp_ns": str(lidar_timestamp),
         "pose_reference": "lidar_timestamp",
+        "geometry": geometry or {},
         "taxonomy_ref": "index.json#taxonomy",
         # ---- legacy fields (viewer / tools backward compatible) ----
         "voxel": float(grid.voxel),
@@ -456,6 +458,8 @@ def export_one(args) -> int:
     )
 
     all_ts = list_clip_frames(clip_dir)
+    from pose_trajectory import load_geometry
+    geometry = load_geometry(clip_dir)
     pose_samples = sag.load_pose_samples(clip_dir)
     if len(pose_samples) < 2:
         raise ValueError("at least two timestamped ego poses are required")
@@ -584,6 +588,7 @@ def export_one(args) -> int:
         "clip_id": args.clip,
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "geometry_quality": geometry_quality,
+        "geometry": geometry,
         "defaults": {
             "occ_voxel": args.occ_voxel,
             "roi": {"x": [-24.0, 24.0], "y": [-25.0, 150.0], "z": [-5.0, 3.0]},
@@ -634,6 +639,7 @@ def export_one(args) -> int:
             max_export_points=args.max_export_points,
             ego_filter=ego_filter,
             pose_samples=pose_samples,
+            geometry=geometry,
         )
         index["frames"].append(
             {

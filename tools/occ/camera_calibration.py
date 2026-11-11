@@ -37,8 +37,16 @@ def parse_camera(cam_doc):
     return K, distortion, np.linalg.inv(T_v_c), T_v_c, int(intrinsic['width']), int(intrinsic['height'])
 
 
-def camera_metadata(name, cam_doc, image_size, image_uri, lidar_timestamp, pose_samples):
+def camera_metadata(name, cam_doc, image_size, image_uri, lidar_timestamp, pose_samples,
+                    geometry=None):
     K, distortion, T_c_v, T_v_c, cal_w, cal_h = parse_camera(cam_doc)
+    source_T_c_v = T_c_v.copy()
+    geometry = geometry or {}
+    calibration = geometry.get('calibration')
+    if calibration:
+        bridge = np.asarray(calibration['T_camera_basis_point_basis'], np.float64).reshape(4, 4)
+        T_c_v = T_c_v @ bridge
+        T_v_c = np.linalg.inv(T_c_v)
     iw, ih = image_size
     if min(cal_w, cal_h, iw, ih) <= 0:
         raise ValueError('Invalid calibrated/image dimensions')
@@ -58,11 +66,15 @@ def camera_metadata(name, cam_doc, image_size, image_uri, lidar_timestamp, pose_
         'K': K_image.reshape(-1).tolist(), 'distortion': distortion.tolist(),
         'T_c_v': T_c_v.reshape(-1).tolist(), 'T_v_c': T_v_c.reshape(-1).tolist(),
         'T_c_v_lidar_ref': (T_c_v @ np.linalg.inv(T_map_v_camera) @ T_map_v_lidar).reshape(-1).tolist(),
-        'time_compensation': {'method': 'ego_pose_linear_position_nlerp_quaternion',
+        'time_compensation': {'method': 'pose_linear_position_nlerp_quaternion',
+                              'pose_source': geometry.get('pose_source', {}).get('decision', 'source_ego_pose'),
                               'lidar_reference_timestamp': lidar_timestamp,
                               'camera_timestamp': timestamp, 'delta_ms': (timestamp - lidar_timestamp) / 1e6},
         'image': {'uri': image_uri, 'mime': 'image/jpeg', 'width': iw, 'height': ih},
     }
+    if calibration:
+        result['T_c_v_source'] = source_T_c_v.reshape(-1).tolist()
+        result['calibration'] = calibration
     # Preserve old rectified/five-coefficient readers without pretending that
     # the first five rational coefficients describe a raw eight-coefficient lens.
     if distortion.size <= 5 or not np.any(distortion[5:]):

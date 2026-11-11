@@ -74,7 +74,7 @@ def _structural_map(points: np.ndarray, meta: dict, voxel: float, max_points: in
     if len(xyz) > max_points:
         xyz = xyz[np.linspace(0, len(xyz)-1, max_points, dtype=np.int64)]
     pose = ((meta.get("dependency") or {}).get("ego_pose") or {}).get("pose")
-    if not pose:
+    if pose_matrix is None and not pose:
         raise ValueError("dependency.ego_pose.pose is missing")
     return sag.transform_points(xyz, sag.ego_pose_to_T_map_vehicle(pose) if pose_matrix is None else pose_matrix).astype(np.float64)
 

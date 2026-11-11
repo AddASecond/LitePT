@@ -406,6 +406,7 @@ def run(
             "model": {"name": "litept-small-waymo-semseg", "version": model_version, "taxonomy": "waymo-22"},
             "coordinate": meta.get("coordinate"), "grid": meta.get("grid"), "stats": meta.get("stats"),
             "assets": assets, "ego_pose": published_ego_pose(meta, raw),
+            "geometry": meta.get('geometry', {}),
             "camera_projection_version": "image-variants-v1" if all(
                 'distortion' in camera for camera in calibrated_cameras) else None,
             "pose_reference": meta['pose_reference'],
@@ -415,6 +416,7 @@ def run(
                 "scene_schema_version": index.get("schema_version"),
                 "geometry_quality": index.get("geometry_quality", index.get("pose_quality")),
                 "source_ego_pose": ((raw.get('dependency') or {}).get('ego_pose')),
+                "source_lidar_merge_raw": ((raw.get('dependency') or {}).get('sensors') or {}).get('lidar_merge_raw'),
             },
             "updated_at": now,
         }
@@ -441,6 +443,7 @@ def run(
         "model": {"name": "litept-small-waymo-semseg", "version": model_version, "taxonomy": "waymo-22"},
         "static_agg": static, "taxonomy": index.get("taxonomy"), "defaults": index.get("defaults"),
         "geometry_quality": index.get("geometry_quality", index.get("pose_quality")),
+        "geometry": index.get('geometry', {}),
         "status": {"state": "complete", "processed_frames": len(prepared), "failed_frames": 0},
         "updated_at": now,
     }

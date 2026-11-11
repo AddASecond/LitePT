@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from pose_trajectory import load_geometry
 
 # Waymo-S LitePT indices (visualize.WAYMO_NAMES)
 WAYMO_DYNAMIC_IDS = frozenset({0, 1, 2, 3, 4, 5, 6, 11, 12})
@@ -15,6 +16,10 @@ WAYMO_GROUND_IDS = frozenset({17, 18, 19, 20, 21})
 
 
 def load_pose_samples(clip_dir: Path) -> list[tuple[int, dict]]:
+    selected = clip_dir / 'pose_samples.json'
+    if selected.is_file():
+        from pose_trajectory import PoseSamples
+        return PoseSamples.load(selected)
     samples = {}
     for path in sorted((clip_dir / 'frames').glob('*/frame.json')):
         ego = (json.loads(path.read_text()).get('dependency') or {}).get('ego_pose') or {}
@@ -26,6 +31,8 @@ def load_pose_samples(clip_dir: Path) -> list[tuple[int, dict]]:
 
 def interpolate_pose(samples: list[tuple[int, dict]], timestamp_ns: int) -> dict:
     """Pose at a sensor reference time; integer-ns bracketing avoids epoch rounding."""
+    if hasattr(samples, 'pose_at'):
+        return samples.pose_at(timestamp_ns)
     if len(samples) < 2:
         raise ValueError('at least two timestamped ego poses are required')
     times = [row[0] for row in samples]
@@ -270,6 +277,7 @@ def load_or_build_static_aggregate(
             "pred_mtime_ns": pred_path.stat().st_mtime_ns if pred_path.is_file() else None,
         })
     expected_fingerprint = hashlib.sha256(json.dumps({
+        "geometry": load_geometry(clip_dir),
         "schema": "static_aggregate/v3", "frames": fingerprint_rows,
         "pose_reference": "lidar_timestamp", "pose_samples": pose_samples,
         "voxel": voxel, "grid_size": grid_size, "ego_filter": ego_filter or {},
