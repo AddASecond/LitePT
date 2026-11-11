@@ -406,6 +406,8 @@ def run(
             "model": {"name": "litept-small-waymo-semseg", "version": model_version, "taxonomy": "waymo-22"},
             "coordinate": meta.get("coordinate"), "grid": meta.get("grid"), "stats": meta.get("stats"),
             "assets": assets, "ego_pose": published_ego_pose(meta, raw),
+            "camera_projection_version": "image-variants-v1" if all(
+                'distortion' in camera for camera in calibrated_cameras) else None,
             "pose_reference": meta['pose_reference'],
             "ego_pose_timestamp_ns": meta['ego_pose_timestamp_ns'],
             "provenance": {

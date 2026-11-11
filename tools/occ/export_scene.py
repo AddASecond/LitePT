@@ -7,7 +7,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,17 +24,7 @@ import quality_gate as qgate
 import static_agg as sag
 import visualize as vis
 
-def camera_names(sensors: dict) -> list[str]:
-    """One image/calibration pair per camera; prefer rectified modern inputs."""
-    candidates = {}
-    priority = {"undistort": 0, None: 1, "raw": 2}
-    for name, sensor in sensors.items():
-        match = re.fullmatch(r"camera(\d+)(?:_(raw|undistort))?", name)
-        if not match or not isinstance(sensor, dict):
-            continue
-        number, variant = match.groups()
-        candidates.setdefault(int(number), []).append((priority[variant], name))
-    return [min(candidates[number])[1] for number in sorted(candidates)]
+from camera_calibration import camera_names, parse_camera, camera_metadata
 
 def list_clip_frames(clip_dir: Path) -> list[str]:
     idx_path = clip_dir / "frames_index.json"
@@ -47,24 +36,6 @@ def list_clip_frames(clip_dir: Path) -> list[str]:
         for p in sorted((clip_dir / "frames").iterdir())
         if (p / "lidar_merge.bin").is_file()
     ]
-
-def parse_camera(cam_doc: dict):
-    model = cam_doc['intrinsic'].get('meta', {}).get('camera_model', 'pinhole')
-    if model != 'pinhole':
-        raise ValueError(f"Viewer requires a pinhole image; use an undistort camera instead of {model}")
-    # Defensive reshape: intrinsic / extrinsic may be stored as flat lists.
-    K = np.asarray(cam_doc["intrinsic"]["intrinsic"], dtype=np.float64).reshape(3, 3)
-    dist = np.asarray(cam_doc["intrinsic"]["distortion"], dtype=np.float64).reshape(-1)
-    if dist.size > 5 and np.any(dist[5:] != 0):
-        raise ValueError("Viewer dist5 cannot represent rational distortion; use the matching undistort camera")
-    dist5 = np.zeros(5, dtype=np.float64)
-    dist5[: min(5, dist.size)] = dist[:5]
-    # T_v_c = camera pose in vehicle (p_veh = T_v_c · p_cam).
-    T_v_c = np.asarray(cam_doc["extrinsic"]["transformation"], dtype=np.float64).reshape(4, 4)
-    T_c_v = np.linalg.inv(T_v_c)
-    w = int(cam_doc["intrinsic"]["width"])
-    h = int(cam_doc["intrinsic"]["height"])
-    return K, dist5, T_c_v, T_v_c, w, h
 
 def pose_stamp_ns(ego: dict) -> int:
     stamp = ego["header"]["stamp"]
@@ -208,10 +179,6 @@ def export_frame(
         if not img_path.is_file() or cam_name not in sensors:
             continue
         cam_doc = sensors[cam_name]
-        K, dist5, T_c_v, T_v_c, cal_w, cal_h = parse_camera(cam_doc)
-        camera_timestamp = int(cam_doc.get("timestamp") or lidar_timestamp)
-        T_map_v_camera = interpolate_pose_matrix(pose_samples, camera_timestamp)
-        T_c_v_lidar_ref = T_c_v @ np.linalg.inv(T_map_v_camera) @ T_map_v_lidar
         # Camera corruption must not invalidate a LiDAR OCC frame.  Verify the
         # source before copying and omit only the unreadable camera asset.
         try:
@@ -224,40 +191,9 @@ def export_frame(
         # clean image copy (no overlays)
         dst = cam_dir / f"{cam_name}.jpg"
         shutil.copy2(img_path, dst)
-        sx = iw / float(cal_w) if cal_w else 1.0
-        sy = ih / float(cal_h) if cal_h else 1.0
-        K_img = K.copy()
-        K_img[0, :] *= sx
-        K_img[1, :] *= sy
-        rel_img = f"frames/{ts}/cameras/{cam_name}.jpg"
-        cameras_meta.append(
-            {
-                "name": cam_name,
-                "md5": cam_doc.get("md5"),
-                "timestamp": camera_timestamp,
-                # legacy relative-to-frame path (viewer fallback)
-                "file": f"cameras/{cam_name}.jpg",
-                "width": iw,
-                "height": ih,
-                "K": K_img.reshape(-1).tolist(),
-                "dist5": dist5.tolist(),
-                "T_c_v": T_c_v.reshape(-1).tolist(),
-                "T_c_v_lidar_ref": T_c_v_lidar_ref.reshape(-1).tolist(),
-                "T_v_c": T_v_c.reshape(-1).tolist(),
-                "time_compensation": {
-                    "method": "ego_pose_linear_position_nlerp_quaternion",
-                    "lidar_reference_timestamp": lidar_timestamp,
-                    "camera_timestamp": camera_timestamp,
-                    "delta_ms": (camera_timestamp - lidar_timestamp) / 1e6,
-                },
-                "image": {
-                    "uri": rel_img,
-                    "mime": "image/jpeg",
-                    "width": iw,
-                    "height": ih,
-                },
-            }
-        )
+        cameras_meta.append(camera_metadata(
+            cam_name, cam_doc, (iw, ih), f"frames/{ts}/cameras/{cam_name}.jpg",
+            lidar_timestamp, pose_samples))
 
     prefix = f"frames/{ts}"
     write_f32(out_frame / "occ_centers.f32.bin", grid.centers)
