@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -57,6 +59,32 @@ def load_lidar_bin(path: Path, num_cols: int = len(LIDAR_COLS)) -> np.ndarray:
     return arr.reshape(-1, num_cols)
 
 
+@contextmanager
+def prediction_slot():
+    """Bound simultaneous model processes independently of clip IO/export workers."""
+    slots = int(os.environ.get('OCC_PREDICTION_SLOTS', '0'))
+    if slots <= 0:
+        yield
+        return
+    import fcntl
+    root = Path(os.environ['OCC_PREDICTION_LOCK_DIR'])
+    root.mkdir(parents=True, exist_ok=True)
+    while True:
+        for slot in range(slots):
+            handle = (root / f'{slot}.lock').open('a')
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.close()
+                continue
+            try:
+                yield
+            finally:
+                handle.close()
+            return
+        time.sleep(.1)
+
+
 def ensure_preds(
     *,
     clip_dir: Path,
@@ -103,7 +131,8 @@ def ensure_preds(
         "--timestamps", *need,
     ]
     print(f"[ensure_preds] missing={len(missing)} -> A CLI", flush=True)
-    proc = subprocess.run(cmd, cwd=str(ROOT), env=os.environ.copy())
+    with prediction_slot():
+        proc = subprocess.run(cmd, cwd=str(ROOT), env=os.environ.copy())
     if proc.returncode != 0:
         raise RuntimeError(f"A warmup CLI failed rc={proc.returncode}")
     for ts in missing:
