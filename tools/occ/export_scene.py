@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -105,6 +106,7 @@ def export_frame(
     ego_filter: dict | None,
     pose_samples: list[tuple[int, dict]],
     geometry: dict | None = None,
+    camera_executor: ThreadPoolExecutor | None = None,
 ) -> dict:
     fr = clip_dir / "frames" / ts
     meta = json.loads((fr / "frame.json").read_text())
@@ -174,11 +176,10 @@ def export_frame(
     cam_dir = out_frame / "cameras"
     cam_dir.mkdir(exist_ok=True)
 
-    cameras_meta = []
-    for cam_name in camera_names(sensors):
+    def export_camera(cam_name):
         img_path = fr / f"{cam_name}.jpg"
         if not img_path.is_file() or cam_name not in sensors:
-            continue
+            return None
         cam_doc = sensors[cam_name]
         # Camera corruption must not invalidate a LiDAR OCC frame.  Verify the
         # source before copying and omit only the unreadable camera asset.
@@ -188,13 +189,16 @@ def export_frame(
                 im.verify()
         except (OSError, ValueError) as error:
             print(f"  [camera-skip] ts={ts} camera={cam_name}: {error}", flush=True)
-            continue
+            return None
         # clean image copy (no overlays)
         dst = cam_dir / f"{cam_name}.jpg"
         shutil.copy2(img_path, dst)
-        cameras_meta.append(camera_metadata(
+        return camera_metadata(
             cam_name, cam_doc, (iw, ih), f"frames/{ts}/cameras/{cam_name}.jpg",
-            lidar_timestamp, pose_samples, geometry=geometry))
+            lidar_timestamp, pose_samples, geometry=geometry)
+
+    camera_map = camera_executor.map if camera_executor is not None else map
+    cameras_meta = [c for c in camera_map(export_camera, camera_names(sensors)) if c is not None]
 
     prefix = f"frames/{ts}"
     write_f32(out_frame / "occ_centers.f32.bin", grid.centers)
@@ -414,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--z-max", type=float, default=20.0)
     ap.add_argument("--export-points", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--max-export-points", type=int, default=200000)
+    ap.add_argument("--camera-workers", type=int, default=4)
     ap.add_argument("--geometry-quality-gate", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--layer-threshold", type=float, default=0.15)
     ap.add_argument("--pose-shift-threshold", type=float, default=0.40)
@@ -618,40 +623,42 @@ def export_one(args) -> int:
     }
     if index_static_agg is not None:
         index["static_agg"] = index_static_agg
-    for i, ts in enumerate(timestamps):
-        out_frame = scene_root / "frames" / ts
-        info = export_frame(
-            clip_id=args.clip,
-            clip_dir=clip_dir,
-            scene_root=scene_root,
-            out_frame=out_frame,
-            ts=ts,
-            pred_dir=pred_dir,
-            static_agg=static_agg,
-            grid_size=args.grid_size,
-            reuse_pred=args.reuse_pred,
-            x_range=x_range,
-            y_range=y_range,
-            z_range=z_range,
-            occ_voxel=args.occ_voxel,
-            occ_min_points=args.occ_min_points,
-            export_points=args.export_points,
-            max_export_points=args.max_export_points,
-            ego_filter=ego_filter,
-            pose_samples=pose_samples,
-            geometry=geometry,
-        )
-        index["frames"].append(
-            {
-                "frame_id": info["frame_id"],
-                "timestamp": ts,
-                "meta_uri": info["meta_uri"],
-                "dir": f"frames/{ts}",
-                "n_occ": info["n_occ"],
-                "n_points": info["n_points"],
-            }
-        )
-        print(f"  [{i+1}/{len(timestamps)}] ts={ts} n_occ={info['n_occ']}", flush=True)
+    with ThreadPoolExecutor(max_workers=max(1, args.camera_workers)) as camera_executor:
+        for i, ts in enumerate(timestamps):
+            out_frame = scene_root / "frames" / ts
+            info = export_frame(
+                clip_id=args.clip,
+                clip_dir=clip_dir,
+                scene_root=scene_root,
+                out_frame=out_frame,
+                ts=ts,
+                pred_dir=pred_dir,
+                static_agg=static_agg,
+                grid_size=args.grid_size,
+                reuse_pred=args.reuse_pred,
+                x_range=x_range,
+                y_range=y_range,
+                z_range=z_range,
+                occ_voxel=args.occ_voxel,
+                occ_min_points=args.occ_min_points,
+                export_points=args.export_points,
+                max_export_points=args.max_export_points,
+                ego_filter=ego_filter,
+                pose_samples=pose_samples,
+                geometry=geometry,
+                camera_executor=camera_executor,
+            )
+            index["frames"].append(
+                {
+                    "frame_id": info["frame_id"],
+                    "timestamp": ts,
+                    "meta_uri": info["meta_uri"],
+                    "dir": f"frames/{ts}",
+                    "n_occ": info["n_occ"],
+                    "n_points": info["n_points"],
+                }
+            )
+            print(f"  [{i+1}/{len(timestamps)}] ts={ts} n_occ={info['n_occ']}", flush=True)
 
     (scene_root / "index.json").write_text(json.dumps(index, indent=2))
     print(f"done -> {scene_root}  viewer: cd /home/dev/01develop/occ_viewer && python serve.py --scene {scene_root}")

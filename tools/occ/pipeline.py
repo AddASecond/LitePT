@@ -137,7 +137,8 @@ def materialize_raw_cache(db, frame_collection: str, clip_collection: str, clip_
 
 def _export_scene(argv: list[str]) -> int:
     from paths import setup_cuda_env
-    setup_cuda_env()
+    # The exporter is CPU-only; its prediction CLI owns the CUDA context.
+    setup_cuda_env(warmup=False)
     import export_scene
     return int(export_scene.main(argv) or 0)
 

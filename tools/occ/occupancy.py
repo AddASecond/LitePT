@@ -89,25 +89,26 @@ def build_occupancy(
 
     # group boundaries (pre-filter so contiguous reduceat ranges are valid for
     # both counts AND majority-label computation).
-    uniq, start_all, counts_all = np.unique(
-        key_s, return_index=True, return_counts=True
-    )
+    # Keys are already sorted; np.unique(return_index=True) sorts them again.
+    start_all = np.r_[0, np.flatnonzero(key_s[1:] != key_s[:-1]) + 1]
+    counts_all = np.diff(np.r_[start_all, key_s.size])
 
-    # Majority label per voxel: per-class counts via np.add.reduceat on the
-    # sorted label array, then argmax over class axis.  Class count loop is
-    # small (Waymo ~ 30).  This replaces the previous "first-label" bug which
-    # ignored all but the 1st point's label in each occupied voxel.
+    # Stream class votes instead of allocating classes x occupied_cells and
+    # taking a strided argmax. Strict > preserves lowest-class tie breaking.
     if lab_s.size:
         n_class = int(lab_s.max()) + 1
     else:
         n_class = 1
     n_class = max(n_class, 1)
-    per_class = np.empty((n_class, start_all.size), dtype=np.int32)
+    best_count = np.zeros(start_all.size, dtype=np.int32)
+    maj_lab_all = np.zeros(start_all.size, dtype=np.int32)
     for c in range(n_class):
-        per_class[c] = np.add.reduceat(
+        class_count = np.add.reduceat(
             (lab_s == c).astype(np.int32, copy=False), start_all
         )
-    maj_lab_all = per_class.argmax(axis=0).astype(np.int32)
+        wins = class_count > best_count
+        best_count[wins] = class_count[wins]
+        maj_lab_all[wins] = c
 
     keep = counts_all >= int(min_points)
     start = start_all[keep]
