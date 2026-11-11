@@ -95,6 +95,14 @@ def find_raw_frame(collection, md5: str, timestamp: int | str | None = None) -> 
     })
 
 def create_indexes(frame_collection, clip_collection) -> None:
+    # Publication, URI finalization, counts and audits all scope by these two
+    # fields. The source identity indexes have different leading keys and
+    # cannot serve these queries without scanning the growing master tables.
+    for collection in (frame_collection, clip_collection):
+        collection.create_index(
+            [("source.clip_id", ASCENDING), ("model.version", ASCENDING)],
+            name="source_clip_version",
+        )
     frame_collection.create_index(
         [("source.frame_collection", ASCENDING), ("source.frame_md5", ASCENDING), ("model.version", ASCENDING)],
         unique=True, name="source_frame_model_unique",
