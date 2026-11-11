@@ -59,33 +59,41 @@ def build_occupancy(
 
     xyz = np.asarray(xyz, dtype=np.float32)
     lab = np.asarray(labels, dtype=np.int32).reshape(-1)
-    m = (
-        (xyz[:, 0] >= x0)
-        & (xyz[:, 0] < x1)
-        & (xyz[:, 1] >= y0)
-        & (xyz[:, 1] < y1)
-        & (xyz[:, 2] >= z0)
-        & (xyz[:, 2] < z1)
-    )
-    xyz = xyz[m]
-    lab = lab[m]
-    if xyz.shape[0] == 0:
-        return empty
+    from voxel_votes import pack_voxels
+    if pack_voxels is not None:
+        bounds = tuple(np.float32(value) for value in (x0, x1, y0, y1, z0, z1, v))
+        key, lab, heights = pack_voxels(xyz, lab, *bounds, nx, ny, nz)
+        if not len(key):
+            return empty
+    else:
+        m = (
+            (xyz[:, 0] >= x0)
+            & (xyz[:, 0] < x1)
+            & (xyz[:, 1] >= y0)
+            & (xyz[:, 1] < y1)
+            & (xyz[:, 2] >= z0)
+            & (xyz[:, 2] < z1)
+        )
+        xyz = xyz[m]
+        lab = lab[m]
+        if xyz.shape[0] == 0:
+            return empty
 
-    ix = np.floor((xyz[:, 0] - x0) / v).astype(np.int32)
-    iy = np.floor((xyz[:, 1] - y0) / v).astype(np.int32)
-    iz = np.floor((xyz[:, 2] - z0) / v).astype(np.int32)
-    ix = np.clip(ix, 0, nx - 1)
-    iy = np.clip(iy, 0, ny - 1)
-    iz = np.clip(iz, 0, nz - 1)
+        ix = np.floor((xyz[:, 0] - x0) / v).astype(np.int32)
+        iy = np.floor((xyz[:, 1] - y0) / v).astype(np.int32)
+        iz = np.floor((xyz[:, 2] - z0) / v).astype(np.int32)
+        ix = np.clip(ix, 0, nx - 1)
+        iy = np.clip(iy, 0, ny - 1)
+        iz = np.clip(iz, 0, nz - 1)
 
-    # pack key
-    key = ix.astype(np.int64) + nx * (iy.astype(np.int64) + ny * iz.astype(np.int64))
-    order = np.argsort(key)
+        # pack key
+        key = ix.astype(np.int64) + nx * (iy.astype(np.int64) + ny * iz.astype(np.int64))
+        heights = xyz[:, 2]
+    from voxel_sort import argsort
+    order = argsort(key)
     key_s = key[order]
     lab_s = lab[order]
-    z_s = xyz[order, 2]
-    ix_s, iy_s, iz_s = ix[order], iy[order], iz[order]
+    z_s = heights[order]
 
     # group boundaries (pre-filter so contiguous reduceat ranges are valid for
     # both counts AND majority-label computation).
@@ -100,15 +108,19 @@ def build_occupancy(
     else:
         n_class = 1
     n_class = max(n_class, 1)
-    best_count = np.zeros(start_all.size, dtype=np.int32)
-    maj_lab_all = np.zeros(start_all.size, dtype=np.int32)
-    for c in range(n_class):
-        class_count = np.add.reduceat(
-            (lab_s == c).astype(np.int32, copy=False), start_all
-        )
-        wins = class_count > best_count
-        best_count[wins] = class_count[wins]
-        maj_lab_all[wins] = c
+    from voxel_votes import majority
+    if majority is not None:
+        maj_lab_all = majority(lab_s, start_all, n_class)
+    else:
+        best_count = np.zeros(start_all.size, dtype=np.int32)
+        maj_lab_all = np.zeros(start_all.size, dtype=np.int32)
+        for c in range(n_class):
+            class_count = np.add.reduceat(
+                (lab_s == c).astype(np.int32, copy=False), start_all
+            )
+            wins = class_count > best_count
+            best_count[wins] = class_count[wins]
+            maj_lab_all[wins] = c
 
     keep = counts_all >= int(min_points)
     start = start_all[keep]
@@ -117,7 +129,9 @@ def build_occupancy(
         return empty
     maj_lab = maj_lab_all[keep]
     max_z = np.maximum.reduceat(z_s, start).astype(np.float32)
-    ijk = np.stack([ix_s[start], iy_s[start], iz_s[start]], axis=1).astype(np.int32)
+    occupied_keys = key_s[start]
+    ijk = np.stack([occupied_keys % nx, (occupied_keys // nx) % ny,
+                    occupied_keys // (nx * ny)], axis=1).astype(np.int32)
 
     centers = np.stack(
         [

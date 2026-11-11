@@ -18,3 +18,4 @@ torch-geometric==2.5.3
 colorhash
 torchmetrics
 boto3>=1.39.11
+numba>=0.59

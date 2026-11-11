@@ -15,6 +15,7 @@ import argparse
 import os
 import sys
 from collections import OrderedDict
+from functools import lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -170,6 +171,7 @@ def load_segmentor(config_file: Path, weight: Path, device: torch.device):
     return model, cfg
 
 
+@lru_cache(maxsize=8)
 def build_infer_transform(grid_size: float = 0.05) -> Compose:
     # Do not pass "segment" — DefaultSegmentorV2 would enter loss path.
     return Compose(
@@ -192,27 +194,29 @@ def build_infer_transform(grid_size: float = 0.05) -> Compose:
     )
 
 
-@torch.no_grad()
-def infer_frame(
-    model,
-    coord: np.ndarray,
-    strength: np.ndarray,
-    device: torch.device,
-    grid_size: float,
-) -> np.ndarray:
+def prepare_infer_frame(coord, strength, grid_size):
     data = dict(coord=coord.astype(np.float32), strength=strength.astype(np.float32))
-    transform = build_infer_transform(grid_size)
-    data = transform(data)
+    return build_infer_transform(grid_size)(data)
+
+
+@torch.no_grad()
+def infer_prepared(model, data, device):
+    # Inverse is only used to expand final labels; it never participates in the
+    # network. Keep it on the CPU instead of transferring it twice.
+    inverse = data.pop("inverse").numpy()
     for k, v in list(data.items()):
         if isinstance(v, torch.Tensor):
             data[k] = v.to(device, non_blocking=True)
     if "offset" not in data:
         data["offset"] = torch.tensor([data["coord"].shape[0]], device=device, dtype=torch.long)
     out = model(data)
-    logits = out["seg_logits"]  # [N_down, C]
-    pred_down = logits.argmax(dim=1).cpu().numpy().astype(np.int64)
-    inverse = data["inverse"].cpu().numpy()
+    pred_down = out["seg_logits"].argmax(dim=1).cpu().numpy().astype(np.int64)
     return pred_down[inverse]
+
+
+@torch.no_grad()
+def infer_frame(model, coord, strength, device, grid_size):
+    return infer_prepared(model, prepare_infer_frame(coord, strength, grid_size), device)
 
 
 def intensity_colors(intensity: np.ndarray) -> np.ndarray:

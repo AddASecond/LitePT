@@ -11,6 +11,8 @@ class PoseSamples(list):
 
     def __init__(self, samples, *, max_gap_ns=250_000_000, endpoint_tolerance_ns=10_000_000):
         super().__init__(samples)
+        self._pose_cache = {}
+        self._matrix_cache = {}
         self.times = np.asarray([int(t) for t, _ in samples], dtype=np.int64)
         self.positions = np.asarray([[p['position'][k] for k in 'xyz'] for _, p in samples], dtype=np.float64)
         quats = np.asarray([[p['orientation'][k] for k in 'xyzw'] for _, p in samples], dtype=np.float64)
@@ -42,14 +44,22 @@ class PoseSamples(list):
         return position, Rotation.from_quat(q)
 
     def pose_at(self, timestamp):
-        position, rotation = self.poses_at([timestamp])
-        return {'position': dict(zip('xyz', position[0].tolist())),
+        timestamp = int(timestamp)
+        if timestamp not in self._pose_cache:
+            position, rotation = self.poses_at([timestamp])
+            self._pose_cache[timestamp] = {
+                'position': dict(zip('xyz', position[0].tolist())),
                 'orientation': dict(zip('xyzw', rotation.as_quat()[0].tolist()))}
+        return {key: dict(value) for key, value in self._pose_cache[timestamp].items()}
 
     def deskew(self, xyz, point_timestamps, reference_timestamp):
         if np.any(np.abs(np.asarray(point_timestamps, np.int64) - int(reference_timestamp)) > 200_000_000):
             raise ValueError('Point timestamp is outside the reference scan')
-        position, rotation = self.poses_at(point_timestamps)
+        # Many LiDAR returns share a firing timestamp. Interpolate and normalize
+        # each distinct quaternion once, retaining the original per-point order.
+        times, inverse = np.unique(np.asarray(point_timestamps, np.int64), return_inverse=True)
+        position, rotation = self.poses_at(times)
+        position, rotation = position[inverse], rotation[inverse]
         origin, basis = self.poses_at([reference_timestamp])
         return basis.inv().apply(rotation.apply(xyz) + position - origin).astype(np.float32)
 

@@ -20,6 +20,7 @@ ensure_import_path(tools=True, repo=True)
 import numpy as np
 from PIL import Image
 
+import artifact_io
 import occupancy as occmod
 import quality_gate as qgate
 import static_agg as sag
@@ -48,13 +49,13 @@ def interpolate_pose_matrix(
     return sag.interpolate_pose_matrix(samples, int(timestamp_ns))
 
 def write_f32(path: Path, arr: np.ndarray) -> None:
-    path.write_bytes(np.asarray(arr, dtype=np.float32).reshape(-1).tobytes())
+    artifact_io.write_bytes(path, np.asarray(arr, dtype=np.float32).reshape(-1).tobytes())
 
 def write_u8(path: Path, arr: np.ndarray) -> None:
-    path.write_bytes(np.asarray(arr, dtype=np.uint8).reshape(-1).tobytes())
+    artifact_io.write_bytes(path, np.asarray(arr, dtype=np.uint8).reshape(-1).tobytes())
 
 def write_i32(path: Path, arr: np.ndarray) -> None:
-    path.write_bytes(np.asarray(arr, dtype=np.int32).reshape(-1).tobytes())
+    artifact_io.write_bytes(path, np.asarray(arr, dtype=np.int32).reshape(-1).tobytes())
 
 def asset_ref(uri: str, dtype: str, shape: list) -> dict:
     return {
@@ -192,7 +193,15 @@ def export_frame(
             return None
         # clean image copy (no overlays)
         dst = cam_dir / f"{cam_name}.jpg"
-        shutil.copy2(img_path, dst)
+        # The source cache is immutable. A hard link preserves the exact JPEG
+        # without copying its bytes again; cross-filesystem exports still work.
+        try:
+            if dst.exists():
+                dst.unlink()
+            os.link(img_path.resolve(), dst)
+        except OSError:
+            shutil.copy2(img_path, dst)
+        artifact_io.camera_ready(dst, cam_doc.get("md5"))
         return camera_metadata(
             cam_name, cam_doc, (iw, ih), f"frames/{ts}/cameras/{cam_name}.jpg",
             lidar_timestamp, pose_samples, geometry=geometry)
@@ -561,9 +570,9 @@ def export_one(args) -> int:
             xyz_m = static_agg["xyz_map"]
             lab_m = static_agg["labels"].astype(np.uint8)
             lid_m = static_agg["lidar_ids"].astype(np.uint8)
-            xyz_m.astype(np.float32).tofile(sa_dir / "xyz_map.f32.bin")
-            lab_m.tofile(sa_dir / "labels.u8.bin")
-            lid_m.tofile(sa_dir / "lidar_id.u8.bin")
+            write_f32(sa_dir / "xyz_map.f32.bin", xyz_m)
+            write_u8(sa_dir / "labels.u8.bin", lab_m)
+            write_u8(sa_dir / "lidar_id.u8.bin", lid_m)
             index_static_agg = {
                 "voxel": float(static_agg.get("voxel", args.static_voxel)),
                 "n": n_sa,

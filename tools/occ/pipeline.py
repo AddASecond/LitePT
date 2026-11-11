@@ -91,20 +91,24 @@ def link_or_convert_lidar(source: Path, target: Path) -> None:
     else:
         raise ValueError(source)
 
-def materialize_raw_cache(db, frame_collection: str, clip_collection: str, clip_id: str, cache: Path) -> int:
-    raw_clip = db[clip_collection].find_one({"clip_id": clip_id})
+def materialize_raw_cache(db, frame_collection: str, clip_collection: str, clip_id: str, cache: Path,
+                          *, raw_clip=None, frames=None, materialize_lidar=None) -> int:
+    raw_clip = db[clip_collection].find_one({"clip_id": clip_id}) if raw_clip is None else raw_clip
     if raw_clip is None:
         raise RuntimeError(f"clip_id={clip_id} absent from {clip_collection}")
-    frames = list(db[frame_collection].find({"clip_id": clip_id}).sort("timestamp", 1))
+    frames = list(db[frame_collection].find({"clip_id": clip_id}).sort("timestamp", 1)) if frames is None else frames
     if not frames:
         raise RuntimeError(f"no frames for clip_id={clip_id} in {frame_collection}")
     index = []
     for number, raw in enumerate(frames, 1):
         ts = str(raw["timestamp"])
         md5 = STORE.raw_lidar_md5(raw) or raw.get("md5")
-        lidar = STORE.resolve_raw(md5, "lidar")
         frame_dir = cache / "frames" / ts
-        link_or_convert_lidar(lidar, frame_dir / "lidar_merge.bin")
+        if materialize_lidar is None:
+            lidar = STORE.resolve_raw(md5, "lidar")
+            link_or_convert_lidar(lidar, frame_dir / "lidar_merge.bin")
+        else:
+            materialize_lidar(raw, frame_dir / "lidar_merge.bin")
         sensors = ((raw.get("dependency") or {}).get("sensors") or {})
         copied_cameras = {}
         for name, sensor in sensors.items():

@@ -18,7 +18,7 @@ if str(ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(ROOT / "tools"))
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, model_cache=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--clip-dir", required=True)
     ap.add_argument("--pred-dir", required=True)
@@ -38,7 +38,26 @@ def main(argv: list[str] | None = None) -> int:
         default="infer",
         help="fake: label everything class 7 (no CUDA)",
     )
+    ap.add_argument("--worker-socket", help="Send this A CLI job to a persistent local model worker")
+    ap.add_argument("--seed", type=int, help="Reproducible inference seed, set after model loading")
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = ap.parse_args(argv)
+    if args.worker_socket:
+        import socket
+        forwarded = argv.copy()
+        option = next(i for i, value in enumerate(forwarded)
+                      if value == '--worker-socket' or value.startswith('--worker-socket='))
+        del forwarded[option:option + (1 if '=' in forwarded[option] else 2)]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1800)
+            client.connect(args.worker_socket)
+            client.sendall((json.dumps({'argv': forwarded}) + '\n').encode())
+            with client.makefile('rb') as stream:
+                result = json.loads(stream.readline(4 * 1024 * 1024))
+        if not result.get('ok'):
+            raise RuntimeError(result.get('error', 'Prediction worker failed'))
+        print(f"persistent prediction complete elapsed={result['elapsed_seconds']:.3f}s", flush=True)
+        return 0
 
     if args.mode == "infer":
         from hami_cuda import setup_cuda_env
@@ -87,16 +106,43 @@ def main(argv: list[str] | None = None) -> int:
     if not todo:
         return 0
 
-    model, _ = h.load_segmentor(ROOT / args.config_file, ROOT / args.weight, "cuda")
-    for i, (ts, n) in enumerate(todo):
-        pts = h.load_lidar_bin(
-            clip / "frames" / ts / "lidar_merge.bin", num_cols=len(h.LIDAR_COLS)
-        )
+    config_path = (ROOT / args.config_file).resolve()
+    weight_path = (ROOT / args.weight).resolve()
+    model_key = tuple((str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in (config_path, weight_path))
+    if model_cache is not None and model_key in model_cache:
+        model = model_cache[model_key]
+    else:
+        if model_cache is not None:
+            model_cache.clear()
+        model, _ = h.load_segmentor(config_path, weight_path, "cuda")
+        if model_cache is not None:
+            model_cache[model_key] = model
+    if args.seed is not None:
+        np.random.seed(args.seed)
+        h.torch.manual_seed(args.seed)
+    from concurrent.futures import ThreadPoolExecutor
+
+    def prepare(ts):
+        pts = h.load_lidar_bin(clip / "frames" / ts / "lidar_merge.bin", num_cols=len(h.LIDAR_COLS))
         coord = pts[:, :3].astype(np.float32)
         strength = np.tanh(pts[:, 3].reshape(-1, 1) / 255.0).astype(np.float32)
-        pred = h.infer_frame(model, coord, strength, "cuda", args.grid_size)
-        np.save(pred_dir / f"{ts}_pred.npy", pred.astype(np.int32))
-        print(f"  [{i+1}/{len(todo)}] {ts} N={len(coord)} pred={pred.shape[0]}", flush=True)
+        return h.prepare_infer_frame(coord, strength, args.grid_size)
+
+    # A single producer preserves NumPy sampling order and keeps at most one
+    # preprocessed frame ahead of the GPU, independent of clip length.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(prepare, todo[0][0])
+        for i, (ts, n) in enumerate(todo):
+            data = future.result()
+            if i + 1 < len(todo):
+                future = pool.submit(prepare, todo[i + 1][0])
+            pred = h.infer_prepared(model, data, "cuda")
+            target = pred_dir / f"{ts}_pred.npy"
+            temporary = target.with_suffix('.partial.npy')
+            np.save(temporary, pred.astype(np.int32))
+            temporary.replace(target)
+            print(f"  [{i+1}/{len(todo)}] {ts} N={n} pred={pred.shape[0]}", flush=True)
+
     return 0
 
 

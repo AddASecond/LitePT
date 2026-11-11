@@ -266,6 +266,8 @@ def run(
     s3_mount_root: str = "",
     s3_profile: str | None = None,
     s3_endpoint: str | None = None,
+    source_documents=None,
+    prepublished=None,
 ) -> int:
     if asset_storage not in ("file", "gridfs", "s3"):
         raise ValueError("asset_storage must be file, gridfs or s3")
@@ -288,10 +290,22 @@ def run(
     raw_frames, raw_clips = db[raw_frame_collection], db[raw_clip_name]
     occ_frames, occ_clips = db[occ_frame_name], db[occ_clip_name]
 
+    source_by_timestamp = None
+    if source_documents is not None:
+        source_clip, source_frames = source_documents
+        source_by_timestamp = {str(frame['timestamp']): frame for frame in source_frames}
+        if len(source_by_timestamp) != len(source_frames) or any(
+                frame['clip_id'] != source_clip['clip_id'] for frame in source_frames):
+            raise ValueError('Invalid source snapshot identity')
     prepared, clip_ids = [], set()
     for entry in index.get("frames") or []:
         md5 = md5_from_backup(entry, backup)
-        raw = find_raw_frame(raw_frames, md5, entry.get("timestamp")) if md5 else None
+        if source_by_timestamp is None:
+            raw = find_raw_frame(raw_frames, md5, entry.get("timestamp")) if md5 else None
+        else:
+            raw = source_by_timestamp.get(str(entry.get('timestamp')))
+            if raw is not None and md5 not in (raw_lidar_md5(raw), raw.get('md5')):
+                raise ValueError('Scene frame differs from source snapshot')
         if raw is None:
             raise RuntimeError(f"raw trace failed for scene frame {entry.get('timestamp')}, md5={md5}")
         lidar_md5 = raw_lidar_md5(raw) or raw.get("md5")
@@ -307,7 +321,7 @@ def run(
     if len(clip_ids) != 1:
         raise RuntimeError(f"expected one raw clip, got {clip_ids}")
     clip_id = next(iter(clip_ids))
-    raw_clip = raw_clips.find_one({"clip_id": clip_id})
+    raw_clip = raw_clips.find_one({"clip_id": clip_id}) if source_documents is None else source_clip
     if raw_clip is None:
         raise RuntimeError(f"raw clip {clip_id} absent from {raw_clip_name}")
     validate_scene_assets(scene, index.get('static_agg'))
@@ -325,7 +339,29 @@ def run(
 
     create_indexes(occ_frames, occ_clips)
     publish = gridfs_publisher(db, gridfs_bucket) if asset_storage == "gridfs" else None
-    if asset_storage == 's3':
+    if asset_storage == 's3' and prepublished is not None:
+        prepublished.close()
+        publish = prepublished.publish
+        def require_uploaded(value):
+            if isinstance(value, dict):
+                if isinstance(value.get('uri'), str):
+                    publish((scene / value['uri']).resolve())
+                else:
+                    for child in value.values():
+                        require_uploaded(child)
+            elif isinstance(value, list):
+                for child in value:
+                    require_uploaded(child)
+        # Check the complete manifest, including clip-level assets, before any
+        # frame metadata can become visible in Mongo.
+        for _, raw, meta, _, _ in prepared:
+            sensors = raw.get('dependency', {}).get('sensors', {})
+            for camera in meta['assets'].get('cameras', []):
+                if not camera.get('md5') or camera['md5'] != sensors.get(camera['name'], {}).get('md5'):
+                    raise ValueError(f"Scene camera differs from source: {camera['name']}")
+            require_uploaded(meta['assets'])
+        require_uploaded(index.get('static_agg'))
+    elif asset_storage == 's3':
         from s3_assets import s3_publisher
         publish = s3_publisher(s3_bucket, s3_prefix, s3_mount_root,
                                profile=s3_profile, endpoint_url=s3_endpoint)

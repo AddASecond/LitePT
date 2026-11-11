@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path, PurePosixPath
 
 
-def s3_publisher(bucket, prefix, mount_root, *, profile=None, endpoint_url=None, client=None):
+def s3_publisher(bucket, prefix, mount_root, *, profile=None, endpoint_url=None, client=None, checksums=None):
     if not bucket or not Path(mount_root).is_absolute():
         raise ValueError('S3 bucket and absolute consumer mount root are required')
     prefix = prefix.strip('/')
@@ -19,9 +19,9 @@ def s3_publisher(bucket, prefix, mount_root, *, profile=None, endpoint_url=None,
     from botocore.exceptions import ClientError
     uploaded = {}
 
-    def verify(key, head, data, digest, md5):
+    def verify(key, head, length, digest, md5):
         remote_sha = head.get('Metadata', {}).get('sha256')
-        if head['ContentLength'] != len(data) or remote_sha not in (None, digest):
+        if head['ContentLength'] != length or remote_sha not in (None, digest):
             raise ValueError(f'S3 digest/length conflict: {bucket}/{key}')
         # Some gateways strip user metadata. Single-part SSE-S3 ETags are
         # content MD5s; other ETags require reading the object to verify it.
@@ -41,10 +41,19 @@ def s3_publisher(bucket, prefix, mount_root, *, profile=None, endpoint_url=None,
                 raise
             return None
 
-    def publish(path, *, source_camera_md5=None):
-        data = Path(path).read_bytes()
-        digest = hashlib.sha256(data).hexdigest()
-        md5 = hashlib.md5(data).digest()
+    def publish(path, *, source_camera_md5=None, data=None):
+        path = Path(path)
+        stat = path.stat()
+        signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        known = (checksums or {}).get(signature) if data is None else None
+        if known is not None:
+            digest, md5 = known
+            length = stat.st_size
+        else:
+            data = path.read_bytes() if data is None else data
+            digest = hashlib.sha256(data).hexdigest()
+            md5 = hashlib.md5(data).digest()
+            length = len(data)
         suffix = ''.join(Path(path).suffixes) or '.bin'
         key = str(PurePosixPath(prefix) / digest[:2] / digest[2:4] / (digest[4:] + suffix))
         head = None
@@ -62,6 +71,8 @@ def s3_publisher(bucket, prefix, mount_root, *, profile=None, endpoint_url=None,
         if head is None:
             head = existing(key)
         if head is None:
+            if data is None:
+                data = path.read_bytes()
             response = client.put_object(Bucket=bucket, Key=key, Body=data,
                               ContentMD5=base64.b64encode(md5).decode(),
                               Metadata={'sha256': digest},
@@ -71,9 +82,9 @@ def s3_publisher(bucket, prefix, mount_root, *, profile=None, endpoint_url=None,
             if response.get('ETag', '').strip('"') != md5.hex():
                 head = client.head_object(Bucket=bucket, Key=key)
         if head is not None:
-            verify(key, head, data, digest, md5)
+            verify(key, head, length, digest, md5)
         result = {'storage': 's3', 'bucket': bucket, 'key': key,
-                  'uri': str(Path(mount_root) / key), 'sha256': digest, 'length': len(data)}
+                  'uri': str(Path(mount_root) / key), 'sha256': digest, 'length': length}
         uploaded[key] = result
         return dict(result)
 

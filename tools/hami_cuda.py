@@ -14,7 +14,7 @@ def setup_cuda_env() -> None:
         cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
         os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
     os.environ["HAMI_DISABLE_WARN"] = "1"
-    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
+    os.environ.setdefault("CUDA_MODULE_LOADING", "EAGER")
     if "TORCH_CUDA_ARCH_LIST" not in os.environ:
         os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
     try:

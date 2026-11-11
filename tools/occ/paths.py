@@ -130,6 +130,10 @@ def ensure_preds(
         "--grid-size", str(grid_size), "--mode", "infer",
         "--timestamps", *need,
     ]
+    if os.environ.get('OCC_PREDICTION_SERVER'):
+        cmd += ['--worker-socket', os.environ['OCC_PREDICTION_SERVER']]
+    if os.environ.get('OCC_PREDICTION_SEED'):
+        cmd += ['--seed', os.environ['OCC_PREDICTION_SEED']]
     print(f"[ensure_preds] missing={len(missing)} -> A CLI", flush=True)
     with prediction_slot():
         proc = subprocess.run(cmd, cwd=str(ROOT), env=os.environ.copy())

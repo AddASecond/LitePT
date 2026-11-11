@@ -79,7 +79,7 @@ def _structural_map(points: np.ndarray, meta: dict, voxel: float, max_points: in
     return sag.transform_points(xyz, sag.ego_pose_to_T_map_vehicle(pose) if pose_matrix is None else pose_matrix).astype(np.float64)
 
 def _trimmed_loss(tree: cKDTree, points: np.ndarray, max_distance: float) -> float:
-    distance = tree.query(points, workers=-1)[0]
+    distance = tree.query(points, workers=1)[0]
     distance = distance[distance < max_distance]
     if len(distance) < 100:
         return float("inf")

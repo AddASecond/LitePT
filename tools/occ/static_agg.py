@@ -58,7 +58,13 @@ def interpolate_pose(samples: list[tuple[int, dict]], timestamp_ns: int) -> dict
 
 
 def interpolate_pose_matrix(samples: list[tuple[int, dict]], timestamp_ns: int) -> np.ndarray:
-    return ego_pose_to_T_map_vehicle(interpolate_pose(samples, timestamp_ns))
+    cache = getattr(samples, '_matrix_cache', None)
+    if cache is None:
+        return ego_pose_to_T_map_vehicle(interpolate_pose(samples, timestamp_ns))
+    timestamp_ns = int(timestamp_ns)
+    if timestamp_ns not in cache:
+        cache[timestamp_ns] = ego_pose_to_T_map_vehicle(interpolate_pose(samples, timestamp_ns))
+    return cache[timestamp_ns].copy()
 
 
 def lidar_reference_timestamp(meta: dict, fallback=None) -> int:
@@ -426,7 +432,15 @@ def static_in_vehicle(
         e = np.zeros((0,), np.int32)
         return z, e, e
     T_v_map = np.linalg.inv(T_map_vehicle)
-    xyz_v = transform_points(xyz_m, T_v_map)
+    # Keep the same homogeneous float64 matmul and point order as the reference.
+    # The map is immutable; avoid rebuilding its Nx4 input for every frame.
+    homogeneous = agg.get("_homogeneous_map")
+    if homogeneous is None or agg.get("_homogeneous_source") is not xyz_m:
+        homogeneous = np.hstack([xyz_m.astype(np.float64),
+                                 np.ones((len(xyz_m), 1), dtype=np.float64)])
+        agg["_homogeneous_map"] = homogeneous
+        agg["_homogeneous_source"] = xyz_m
+    xyz_v = (T_v_map @ homogeneous.T).T[:, :3].astype(np.float32)
     lab = agg["labels"]
     lid = agg["lidar_ids"]
     m = np.ones(xyz_v.shape[0], dtype=bool)
