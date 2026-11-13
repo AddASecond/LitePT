@@ -464,7 +464,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="Must be 1: aggregate all source frames")
     ap.add_argument("--occ-voxel", type=float, default=0.25)
     ap.add_argument("--occ-min-points", type=int, default=1)
-    ap.add_argument("--bev-x-half", type=float, default=30.0)
+    ap.add_argument("--bev-x-half", type=float, default=40.0)
     ap.add_argument("--bev-y-min", type=float, default=-200.0)
     ap.add_argument("--bev-y-max", type=float, default=400.0)
     ap.add_argument("--z-min", type=float, default=-5.0)

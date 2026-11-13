@@ -9,6 +9,15 @@ import rt7
 
 
 class RT7Tests(unittest.TestCase):
+    def test_40m_lateral_roi_includes_new_bands_and_excludes_upper_boundary(self):
+        cloud = np.array([[-40.01,0,0],[-40,0,0],[-35,0,0],[35,0,0],[39.99,0,0],[40,0,0]], np.float32)
+        grid = occupancy.build_occupancy(cloud, rt7.map_labels(np.full(len(cloud),17)),
+            x_range=(-40,40), y_range=(-200,400), z_range=(-5,20), voxel=.25)
+        self.assertEqual(grid.shape, (320,2400,100))
+        np.testing.assert_array_equal(grid.ijk[:,0], [0,20,300,319])
+        np.testing.assert_array_equal(grid.labels, np.zeros(4))
+        self.assertEqual(int(grid.counts.sum()), 4)
+
     def test_mapping_and_invalid_inputs(self):
         np.testing.assert_array_equal(rt7.map_labels(np.arange(22)),
             [2,2,2,2,2,2,2,6,6,6,6,2,2,5,4,4,3,0,0,1,1,1])
