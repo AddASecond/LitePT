@@ -25,6 +25,7 @@ import artifact_io
 import occupancy as occmod
 import quality_gate as qgate
 import static_agg as sag
+import rt7
 import visualize as vis
 
 from camera_calibration import camera_names, parse_camera, camera_metadata
@@ -71,6 +72,9 @@ def link_reused_assets(scene_root: Path, previous_scene: Path, value):
     """Reference immutable prior assets without regenerating or publishing them."""
     if isinstance(value, dict):
         if 'uri' in value:
+            if value.get('storage') == 's3' and value.get('bucket') and value.get('key') and value.get('sha256'):
+                # Existing published assets remain remote immutable references.
+                return
             relative = Path(value['uri'])
             if relative.is_absolute() or '..' in relative.parts:
                 raise ValueError(f'Expected scene-relative asset: {relative}')
@@ -203,7 +207,7 @@ def export_frame(
 
     grid = occmod.build_occupancy(
         vis_xyz,
-        vis_lab,
+        rt7.map_labels(vis_lab),
         x_range=x_range,
         y_range=y_range,
         z_range=z_range,
@@ -379,6 +383,8 @@ def export_frame(
         "assets": {
             "occupancy": {
                 "n": n_occ,
+                "label_encoding": rt7.NAME,
+                "taxonomy": rt7.taxonomy(),
                 "ijk": asset_ref(f"{prefix}/occ_ijk.i32.bin", "int32", [n_occ, 3]),
                 "labels": asset_ref(f"{prefix}/occ_labels.u8.bin", "uint8", [n_occ]),
                 "centers": asset_ref(
@@ -699,6 +705,7 @@ def export_one(args) -> int:
             "ego_filter": ego_filter,
         },
         "taxonomy": {
+            "rt7": rt7.taxonomy(),
             "fine": {
                 "n": len(vis.WAYMO_NAMES),
                 "names": list(vis.WAYMO_NAMES),
