@@ -155,8 +155,10 @@ def point_clip_mask(coord: np.ndarray, pc_range) -> np.ndarray:
 
 
 def load_segmentor(config_file: Path, weight: Path, device: torch.device):
+    print(f"building model from {config_file}", flush=True)
     cfg = Config.fromfile(str(config_file))
     model = build_model(cfg.model)
+    print(f"loading checkpoint {weight}", flush=True)
     ckpt = torch.load(str(weight), map_location="cpu", weights_only=False)
     state = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
     cleaned = OrderedDict()
@@ -165,7 +167,7 @@ def load_segmentor(config_file: Path, weight: Path, device: torch.device):
             k = k[len("module.") :]
         cleaned[k] = v
     info = model.load_state_dict(cleaned, strict=True)
-    print(f"loaded weight: {weight}  missing={info.missing_keys} unexpected={info.unexpected_keys}")
+    print(f"loaded weight: {weight}  missing={info.missing_keys} unexpected={info.unexpected_keys}", flush=True)
     model.to(device)
     model.eval()
     return model, cfg

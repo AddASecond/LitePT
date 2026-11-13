@@ -486,6 +486,7 @@ def run(
         "start_timestamp": min(timestamps), "end_timestamp": max(timestamps),
         "model": {"name": "litept-small-waymo-semseg", "version": model_version, "taxonomy": "waymo-22"},
         "static_agg": static, "taxonomy": index.get("taxonomy"), "defaults": index.get("defaults"),
+        "aggregation": index.get("aggregation"),
         "geometry_quality": index.get("geometry_quality", index.get("pose_quality")),
         "geometry": index.get('geometry', {}),
         "status": {"state": "complete", "processed_frames": len(prepared), "failed_frames": 0},

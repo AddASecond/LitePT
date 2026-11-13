@@ -52,7 +52,7 @@ class PoseReferenceTests(unittest.TestCase):
                 'ego_pose': {'pose': pose(10)}, 'sensors': {'lidar_merge_deskew': {'md5': 'a'*32}}}}))
             kwargs = dict(clip_dir=root, pred_dir=pred, timestamps=['25000000'],
                           load_lidar_bin=lambda p, num_cols: np.fromfile(p, np.float32).reshape(-1, num_cols),
-                          lidar_cols=7, voxel=.01, cache_path=root / 'aggregate.npz', use_oracle_boxes=False)
+                          lidar_cols=7, voxel=0, cache_path=root / 'aggregate.npz', use_oracle_boxes=False)
             samples = [(0, pose(0)), (100_000_000, pose(10))]
             first = sag.load_or_build_static_aggregate(**kwargs, pose_samples=samples)
             np.testing.assert_allclose(first['xyz_map'], [[5.5, 6., 0.]])

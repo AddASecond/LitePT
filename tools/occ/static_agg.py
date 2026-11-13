@@ -251,16 +251,20 @@ def load_or_build_static_aggregate(
     model=None,
     device=None,
     grid_size: float = 0.05,
-    voxel: float = 0.2,
+    voxel: float = 0.0,
     cache_path: Path | None = None,
     use_oracle_boxes: bool = True,
-    max_points_per_frame: int = 120000,
+    max_points_per_frame: int | None = None,
     seed: int = 0,
     ego_filter: dict | None = None,
     require_deskew: bool = True,
     pose_samples: list[tuple[int, dict]] | None = None,
 ) -> dict:
     """Return dict with xyz_map, labels, lidar_ids (map frame), meta."""
+    if voxel != 0 or max_points_per_frame not in (None, 0):
+        raise ValueError('Static point downsampling is disabled; voxel and point cap must be zero')
+    if len(set(timestamps)) != len(timestamps):
+        raise ValueError('Duplicate aggregation timestamps')
     fingerprint_rows = []
     pose_samples = load_pose_samples(clip_dir) if pose_samples is None else pose_samples
     fingerprint_metas: dict[str, dict] = {}
@@ -269,7 +273,9 @@ def load_or_build_static_aggregate(
         meta_path = frame / "frame.json"
         pred_path = pred_dir / f"{ts}_pred.npy"
         if not meta_path.is_file():
-            continue
+            raise FileNotFoundError(meta_path)
+        if not (frame / 'lidar_merge.bin').is_file():
+            raise FileNotFoundError(frame / 'lidar_merge.bin')
         meta = json.loads(meta_path.read_text())
         fingerprint_metas[ts] = meta
         deskew = (((meta.get("dependency") or {}).get("sensors") or {}).get("lidar_merge_deskew") or {})
@@ -284,7 +290,7 @@ def load_or_build_static_aggregate(
         })
     expected_fingerprint = hashlib.sha256(json.dumps({
         "geometry": load_geometry(clip_dir),
-        "schema": "static_aggregate/v3", "frames": fingerprint_rows,
+        "schema": "static_aggregate/fullpoints-v4", "frames": fingerprint_rows,
         "pose_reference": "lidar_timestamp", "pose_samples": pose_samples,
         "voxel": voxel, "grid_size": grid_size, "ego_filter": ego_filter or {},
         "use_oracle_boxes": use_oracle_boxes, "require_deskew": require_deskew,
@@ -303,7 +309,6 @@ def load_or_build_static_aggregate(
             }
         data.close()
 
-    rng = np.random.default_rng(seed)
     acc_xyz: list[np.ndarray] = []
     acc_lab: list[np.ndarray] = []
     acc_lid: list[np.ndarray] = []
@@ -313,12 +318,12 @@ def load_or_build_static_aggregate(
         fr = clip_dir / "frames" / ts
         lidar_path = fr / "lidar_merge.bin"
         if not lidar_path.is_file():
-            continue
+            raise FileNotFoundError(lidar_path)
         meta = fingerprint_metas.get(ts)
         if meta is None:
             meta_path = fr / "frame.json"
             if not meta_path.is_file():
-                continue
+                raise FileNotFoundError(meta_path)
             meta = json.loads(meta_path.read_text())
         deskew = (((meta.get("dependency") or {}).get("sensors") or {}).get("lidar_merge_deskew") or {})
         if require_deskew and not deskew.get("md5"):
@@ -336,12 +341,12 @@ def load_or_build_static_aggregate(
             pred = np.load(pred_path).astype(np.int64).reshape(-1)
             if pred.shape[0] != coord.shape[0]:
                 if infer_frame is None:
-                    continue
+                    raise ValueError(f'{ts}: prediction count does not match source points')
                 pred = infer_frame(model, coord, strength, device, grid_size)
                 np.save(pred_path, pred.astype(np.int32))
         else:
             if infer_frame is None:
-                continue
+                raise FileNotFoundError(pred_path)
             pred = infer_frame(model, coord, strength, device, grid_size)
             pred_dir.mkdir(parents=True, exist_ok=True)
             np.save(pred_path, pred.astype(np.int32))
@@ -364,10 +369,6 @@ def load_or_build_static_aggregate(
         xyz_s = coord[keep]
         lab_s = pred[keep].astype(np.int32)
         lid_s = lidar_ids[keep]
-        if xyz_s.shape[0] > max_points_per_frame:
-            idx = rng.choice(xyz_s.shape[0], size=max_points_per_frame, replace=False)
-            xyz_s, lab_s, lid_s = xyz_s[idx], lab_s[idx], lid_s[idx]
-
         xyz_m = transform_points(xyz_s, T_map_v)
         acc_xyz.append(xyz_m)
         acc_lab.append(lab_s)
@@ -389,15 +390,13 @@ def load_or_build_static_aggregate(
         xyz = np.concatenate(acc_xyz, axis=0)
         lab = np.concatenate(acc_lab, axis=0)
         lid = np.concatenate(acc_lid, axis=0)
-        print(f"  [static-agg] raw static points={xyz.shape[0]} from {used} frames; voxel={voxel}", flush=True)
-        xyz, lab, lid = voxel_downsample(xyz, lab, lid, voxel=voxel)
-        print(f"  [static-agg] after voxel={xyz.shape[0]}", flush=True)
+        print(f"  [static-agg] raw static points={xyz.shape[0]} from {used} frames; downsample=disabled", flush=True)
         out = {
             "xyz_map": xyz,
             "labels": lab,
             "lidar_ids": lid,
             "n_frames": used,
-            "voxel": voxel,
+            "voxel": 0.0,
             "from_cache": False,
         }
 
@@ -417,6 +416,16 @@ def load_or_build_static_aggregate(
     return out
 
 
+def prepare_static_transform(agg):
+    """Initialize immutable homogeneous input before concurrent readers."""
+    xyz_m = agg['xyz_map']
+    if agg.get('_homogeneous_source') is not xyz_m:
+        agg['_homogeneous_map'] = np.hstack([xyz_m.astype(np.float64),
+                                            np.ones((len(xyz_m), 1), dtype=np.float64)])
+        agg['_homogeneous_source'] = xyz_m
+    return agg['_homogeneous_map']
+
+
 def static_in_vehicle(
     agg: dict,
     T_map_vehicle: np.ndarray,
@@ -434,12 +443,7 @@ def static_in_vehicle(
     T_v_map = np.linalg.inv(T_map_vehicle)
     # Keep the same homogeneous float64 matmul and point order as the reference.
     # The map is immutable; avoid rebuilding its Nx4 input for every frame.
-    homogeneous = agg.get("_homogeneous_map")
-    if homogeneous is None or agg.get("_homogeneous_source") is not xyz_m:
-        homogeneous = np.hstack([xyz_m.astype(np.float64),
-                                 np.ones((len(xyz_m), 1), dtype=np.float64)])
-        agg["_homogeneous_map"] = homogeneous
-        agg["_homogeneous_source"] = xyz_m
+    homogeneous = prepare_static_transform(agg)
     xyz_v = (T_v_map @ homogeneous.T).T[:, :3].astype(np.float32)
     lab = agg["labels"]
     lid = agg["lidar_ids"]

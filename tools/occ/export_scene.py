@@ -66,6 +66,29 @@ def asset_ref(uri: str, dtype: str, shape: list) -> dict:
         "byte_order": "little",
     }
 
+
+def link_reused_assets(scene_root: Path, previous_scene: Path, value):
+    """Reference immutable prior assets without regenerating or publishing them."""
+    if isinstance(value, dict):
+        if 'uri' in value:
+            relative = Path(value['uri'])
+            if relative.is_absolute() or '..' in relative.parts:
+                raise ValueError(f'Expected scene-relative asset: {relative}')
+            source = (previous_scene / relative).resolve(strict=True)
+            target = scene_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                if target.resolve() != source:
+                    raise ValueError(f'Reused asset conflicts with existing file: {target}')
+            else:
+                target.symlink_to(source)
+        else:
+            for child in value.values():
+                link_reused_assets(scene_root, previous_scene, child)
+    elif isinstance(value, list):
+        for child in value:
+            link_reused_assets(scene_root, previous_scene, child)
+
 def coarse_taxonomy() -> dict:
     # 0 dynamic, 1 static, 2 freespace, 3 noise
     fine_to_coarse = []
@@ -109,7 +132,11 @@ def export_frame(
     pose_samples: list[tuple[int, dict]],
     geometry: dict | None = None,
     camera_executor: ThreadPoolExecutor | None = None,
+    reuse_scene: Path | None = None,
+    shared_static: bool = False,
 ) -> dict:
+    if max_export_points != 0:
+        raise ValueError('Point-cloud downsampling is disabled; point cap must be zero')
     fr = clip_dir / "frames" / ts
     meta = json.loads((fr / "frame.json").read_text())
     sensors = meta["dependency"]["sensors"]
@@ -138,6 +165,16 @@ def export_frame(
     frame_sensor_xyz = coord.copy()
     frame_sensor_labels = pred.astype(np.int32, copy=True)
     frame_sensor_lidar_ids = lidar_ids.copy()
+    reused = None
+    if reuse_scene is not None:
+        previous = json.loads((reuse_scene / 'frames' / ts / 'meta.json').read_text())
+        if previous.get('geometry') != (geometry or {}) or int(previous['ego_pose_timestamp_ns']) != lidar_timestamp:
+            raise ValueError('Cannot reuse assets across different geometry inputs')
+        reused = previous['assets']
+        if reused['frame_sensor_points']['n'] != len(coord):
+            raise ValueError('Cached single-frame cloud has a different point count')
+        for group in ('cameras', 'frame_sensor_points'):
+            link_reused_assets(scene_root, reuse_scene, reused[group])
 
     ego_keep, ego_filter_stats = sag.ground_aware_ego_keep_mask(coord, pred, ego_filter)
     coord, pred, lidar_ids = coord[ego_keep], pred[ego_keep], lidar_ids[ego_keep]
@@ -208,7 +245,8 @@ def export_frame(
             lidar_timestamp, pose_samples, geometry=geometry)
 
     camera_map = camera_executor.map if camera_executor is not None else map
-    cameras_meta = [c for c in camera_map(export_camera, camera_names(sensors)) if c is not None]
+    cameras_meta = (reused['cameras'] if reused is not None else
+                    [c for c in camera_map(export_camera, camera_names(sensors)) if c is not None])
 
     prefix = f"frames/{ts}"
     write_f32(out_frame / "occ_centers.f32.bin", grid.centers)
@@ -221,7 +259,9 @@ def export_frame(
     points_assets = None
     frame_sensor_points_assets = None
     n_points_exported = 0
-    if export_points:
+    if export_points and reused is not None:
+        frame_sensor_points_assets = reused['frame_sensor_points']
+    if export_points and reused is None:
         write_f32(out_frame / "frame_sensor_points_xyz.f32.bin", frame_sensor_xyz)
         write_u8(
             out_frame / "frame_sensor_points_labels.u8.bin",
@@ -252,9 +292,13 @@ def export_frame(
                 [n_frame_sensor],
             ),
         }
-        # Prefer full static_agg (pose-transformed) + frame dynamic.
-        # Deterministic static stride so scrubbing frames only moves coords.
-        if xyz_s.shape[0] > 0:
+    if export_points:
+        # Preserve every selected static and current-frame dynamic point.
+        composed = shared_static and static_agg is not None and len(static_agg['xyz_map']) > 0
+        if composed:
+            dyn = np.isin(pred, list(sag.WAYMO_DYNAMIC_IDS))
+            p_xyz, p_lab, p_lid = coord[dyn], pred[dyn], lidar_ids[dyn]
+        elif xyz_s.shape[0] > 0:
             # re-merge explicitly for stable export ordering: static then dyn
             dyn = np.isin(pred.astype(np.int64), list(sag.WAYMO_DYNAMIC_IDS))
             xyz_d = coord[dyn]
@@ -262,38 +306,11 @@ def export_frame(
             lid_d = lidar_ids[dyn]
             n_d = int(xyz_d.shape[0])
             n_s = int(xyz_s.shape[0])
-            max_n = int(max_export_points)
-            if n_s + n_d <= max_n:
-                p_xyz = np.concatenate([xyz_s, xyz_d], axis=0) if n_d else xyz_s
-                p_lab = np.concatenate([lab_s, lab_d], axis=0) if n_d else lab_s
-                p_lid = np.concatenate([lid_s, lid_d], axis=0) if n_d else lid_s
-            else:
-                budget_s = max(max_n // 4, max_n - n_d)
-                budget_s = min(budget_s, max_n)
-                if n_d > max_n - budget_s:
-                    rng = np.random.default_rng(0)
-                    di = rng.choice(n_d, size=max_n - budget_s, replace=False)
-                    xyz_d, lab_d, lid_d = xyz_d[di], lab_d[di], lid_d[di]
-                    budget_s = max_n - xyz_d.shape[0]
-                if n_s > budget_s:
-                    step = int(np.ceil(n_s / max(1, budget_s)))
-                    si = np.arange(0, n_s, step)[:budget_s]
-                    xyz_s_e, lab_s_e, lid_s_e = xyz_s[si], lab_s[si], lid_s[si]
-                else:
-                    xyz_s_e, lab_s_e, lid_s_e = xyz_s, lab_s, lid_s
-                p_xyz = np.concatenate([xyz_s_e, xyz_d], axis=0)
-                p_lab = np.concatenate([lab_s_e, lab_d], axis=0)
-                p_lid = np.concatenate([lid_s_e, lid_d], axis=0)
+            p_xyz = np.concatenate([xyz_s, xyz_d], axis=0) if n_d else xyz_s
+            p_lab = np.concatenate([lab_s, lab_d], axis=0) if n_d else lab_s
+            p_lid = np.concatenate([lid_s, lid_d], axis=0) if n_d else lid_s
         else:
-            n = vis_xyz.shape[0]
-            if n > max_export_points:
-                rng = np.random.default_rng(0)
-                idx = rng.choice(n, size=max_export_points, replace=False)
-                p_xyz = vis_xyz[idx]
-                p_lab = vis_lab[idx]
-                p_lid = vis_lid[idx]
-            else:
-                p_xyz, p_lab, p_lid = vis_xyz, vis_lab, vis_lid
+            p_xyz, p_lab, p_lid = vis_xyz, vis_lab, vis_lid
         write_f32(out_frame / "points_xyz.f32.bin", p_xyz)
         write_u8(out_frame / "points_labels.u8.bin", np.asarray(p_lab, dtype=np.uint8))
         write_u8(out_frame / "points_lidar_id.u8.bin", np.asarray(p_lid, dtype=np.uint8))
@@ -312,6 +329,19 @@ def export_frame(
                 f"{prefix}/points_lidar_id.u8.bin", "uint8", [n_points_exported]
             ),
         }
+        if composed:
+            points_assets.update({
+                'layout': 'clip_static_plus_frame_dynamic/v1',
+                'static_ref': 'index.json#static_agg',
+                'logical_n': int(vis_xyz.shape[0]),
+                'static_n': int(xyz_s.shape[0]),
+                'T_vehicle_map': np.linalg.inv(T_map_v_lidar).reshape(-1).tolist(),
+                'static_roi': {'x': [x_range[0] * 1.5, x_range[1] * 1.5],
+                               'y': list(y_range), 'z': [z_range[0] - 2.0, z_range[1] + 5.0]},
+                'static_roi_inclusive': True,
+                'ordering': 'static_then_dynamic',
+                'point_downsampling': False,
+            })
 
     pose = reference_pose
     origin = [float(x_range[0]), float(y_range[0]), float(z_range[0])]
@@ -417,10 +447,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-initial-seconds", type=float, default=1.0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--reuse-pred", action="store_true")
+    ap.add_argument("--require-cached-preds", action="store_true",
+                    help="Fail on missing predictions instead of starting inference")
+    ap.add_argument("--reuse-scene", type=Path,
+                    help="Reuse existing cameras/single-frame clouds; regenerate only aggregation and OCC")
     ap.add_argument("--aggregate-static", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--static-voxel", type=float, default=0.25)
-    ap.add_argument("--agg-stride", type=int, default=5)
-    ap.add_argument("--occ-voxel", type=float, default=0.2)
+    ap.add_argument("--static-voxel", type=float, default=0.0,
+                    help="Deprecated compatibility option; static point downsampling is disabled")
+    ap.add_argument("--agg-stride", type=int, default=1,
+                    help="Must be 1: aggregate all source frames")
+    ap.add_argument("--occ-voxel", type=float, default=0.25)
     ap.add_argument("--occ-min-points", type=int, default=1)
     ap.add_argument("--bev-x-half", type=float, default=30.0)
     ap.add_argument("--bev-y-min", type=float, default=-200.0)
@@ -428,8 +464,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--z-min", type=float, default=-5.0)
     ap.add_argument("--z-max", type=float, default=20.0)
     ap.add_argument("--export-points", action=argparse.BooleanOptionalAction, default=False)
-    ap.add_argument("--max-export-points", type=int, default=200000)
+    ap.add_argument("--max-export-points", type=int, default=0,
+                    help="0 exports every point; positive values are rejected to prevent downsampling")
     ap.add_argument("--camera-workers", type=int, default=4)
+    ap.add_argument('--frame-workers', type=int, default=1)
+    ap.add_argument('--shared-static', action='store_true',
+                    help='Store clip static once and only dynamic points per frame (requires compatible reader)')
+    ap.add_argument('--no-static-cache', action='store_true', help='Avoid compressing a transient aggregate cache')
     ap.add_argument("--geometry-quality-gate", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--layer-threshold", type=float, default=0.15)
     ap.add_argument("--pose-shift-threshold", type=float, default=0.40)
@@ -440,6 +481,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ego-min-height", type=float, default=0.35)
     ap.add_argument("--ego-max-height", type=float, default=4.0)
     args = ap.parse_args(argv)
+    if args.agg_stride != 1:
+        ap.error('Static aggregation must use every frame; --agg-stride must be 1')
+    if args.frame_workers < 1:
+        ap.error('--frame-workers must be positive')
+    if args.shared_static and (not args.aggregate_static or not args.export_points):
+        ap.error('--shared-static requires static aggregation and exported points')
+    if args.require_cached_preds and not args.reuse_pred:
+        ap.error('--require-cached-preds requires --reuse-pred')
+    if args.reuse_scene and (not args.require_cached_preds or args.stride != 1 or args.max_frames != 0 or args.skip_initial_seconds != 0):
+        ap.error('--reuse-scene requires cached predictions, stride=1, max-frames=0 and skip-initial-seconds=0')
+    if args.static_voxel != 0:
+        ap.error("static point downsampling is disabled; --static-voxel must be 0")
+    if args.max_export_points != 0:
+        ap.error("point-cloud downsampling is disabled; --max-export-points must be 0")
 
     clips: list[str]
     if args.clips_json:
@@ -475,18 +530,32 @@ def export_one(args) -> int:
     )
 
     all_ts = list_clip_frames(clip_dir)
+    if len(set(all_ts)) != len(all_ts):
+        raise ValueError('Duplicate source timestamps')
     from pose_trajectory import load_geometry
     geometry = load_geometry(clip_dir)
     pose_samples = sag.load_pose_samples(clip_dir)
     if len(pose_samples) < 2:
         raise ValueError("at least two timestamped ego poses are required")
-    if all_ts and args.skip_initial_seconds > 0:
+    export_ts = list(all_ts)
+    if export_ts and args.skip_initial_seconds > 0:
         cutoff = int(all_ts[0]) + int(args.skip_initial_seconds * 1e9)
-        all_ts = [ts for ts in all_ts if int(ts) >= cutoff]
-        print(f"skip initial {args.skip_initial_seconds:g}s -> first={all_ts[0] if all_ts else 'none'}")
-    timestamps = all_ts[:: max(1, args.stride)]
+        export_ts = [ts for ts in export_ts if int(ts) >= cutoff]
+        print(f"skip initial {args.skip_initial_seconds:g}s -> first={export_ts[0] if export_ts else 'none'}")
+    timestamps = export_ts[:: max(1, args.stride)]
     if args.max_frames > 0:
         timestamps = timestamps[: args.max_frames]
+    reuse_scene = getattr(args, 'reuse_scene', None)
+    if reuse_scene is not None:
+        reuse_scene = reuse_scene.resolve(strict=True)
+        if reuse_scene == scene_root:
+            raise ValueError('Derived refresh must use a new scene directory')
+        old_index = json.loads((reuse_scene / 'index.json').read_text())
+        if old_index.get('geometry') != geometry:
+            raise ValueError('Previous scene geometry differs from selected inputs')
+        timestamps = [str(row['timestamp']) for row in old_index['frames']]
+        if not set(timestamps) <= set(all_ts):
+            raise ValueError('Previous scene has unknown source timestamps')
     stage_started = time.monotonic()
     geometry_quality = qgate.assess_clip_geometry(
         clip_dir,
@@ -519,7 +588,9 @@ def export_one(args) -> int:
         "method": "semantic_ground_robust_plane/v1",
     }
 
-    agg_ts = all_ts[:: max(1, args.agg_stride)] if args.aggregate_static else []
+    if args.agg_stride != 1:
+        raise ValueError('Static aggregation must use every source frame')
+    agg_ts = list(all_ts) if args.aggregate_static else []
     # B never loads the model: ensure preds via A CLI, then read npy only.
     if not args.reuse_pred:
         for ts in list(dict.fromkeys(list(timestamps) + list(agg_ts))):
@@ -538,6 +609,7 @@ def export_one(args) -> int:
         config_file=args.config_file,
         weight=args.weight,
         grid_size=args.grid_size,
+        require_cached=getattr(args, 'require_cached_preds', False),
     )
     timings["prediction_wait_and_run_seconds"] = time.monotonic() - stage_started
 
@@ -561,8 +633,8 @@ def export_one(args) -> int:
             model=None,
             device=None,
             grid_size=args.grid_size,
-            voxel=args.static_voxel,
-            cache_path=cache_path,
+            voxel=0.0,
+            cache_path=None if getattr(args, 'no_static_cache', False) else cache_path,
             use_oracle_boxes=True,
             ego_filter=ego_filter,
             pose_samples=pose_samples,
@@ -582,7 +654,7 @@ def export_one(args) -> int:
             write_u8(sa_dir / "labels.u8.bin", lab_m)
             write_u8(sa_dir / "lidar_id.u8.bin", lid_m)
             index_static_agg = {
-                "voxel": float(static_agg.get("voxel", args.static_voxel)),
+                "voxel": None,
                 "n": n_sa,
                 "xyz_map": {
                     "uri": "static_agg/xyz_map.f32.bin",
@@ -612,6 +684,10 @@ def export_one(args) -> int:
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "geometry_quality": geometry_quality,
         "geometry": geometry,
+        "aggregation": {
+            "stride": 1, "source_timestamps": agg_ts,
+            "source_frame_count": len(agg_ts), "point_downsampling": False,
+        },
         "defaults": {
             "occ_voxel": args.occ_voxel,
             "roi": {"x": [-24.0, 24.0], "y": [-25.0, 150.0], "z": [-5.0, 3.0]},
@@ -641,9 +717,13 @@ def export_one(args) -> int:
     }
     if index_static_agg is not None:
         index["static_agg"] = index_static_agg
+    # Initialize the immutable transform input once before concurrent frame work.
+    if static_agg is not None and getattr(args, 'frame_workers', 1) > 1:
+        sag.prepare_static_transform(static_agg)
     stage_started = time.monotonic()
     with ThreadPoolExecutor(max_workers=max(1, args.camera_workers)) as camera_executor:
-        for i, ts in enumerate(timestamps):
+        def one_frame(ts):
+            started = time.monotonic()
             out_frame = scene_root / "frames" / ts
             info = export_frame(
                 clip_id=args.clip,
@@ -666,7 +746,14 @@ def export_one(args) -> int:
                 pose_samples=pose_samples,
                 geometry=geometry,
                 camera_executor=camera_executor,
+                reuse_scene=reuse_scene,
+                shared_static=getattr(args, 'shared_static', False),
             )
+            print(f'frame ready ts={ts} seconds={time.monotonic() - started:.2f} n_occ={info["n_occ"]}', flush=True)
+            return info
+        with ThreadPoolExecutor(max_workers=getattr(args, 'frame_workers', 1)) as frame_executor:
+            infos = list(frame_executor.map(one_frame, timestamps))
+        for i, (ts, info) in enumerate(zip(timestamps, infos)):
             index["frames"].append(
                 {
                     "frame_id": info["frame_id"],

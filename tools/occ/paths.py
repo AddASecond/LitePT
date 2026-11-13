@@ -31,7 +31,7 @@ def ensure_import_path(*, tools: bool = False, repo: bool = False) -> Path:
 
 
 def setup_cuda_env(*, warmup: bool = True) -> None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
     os.environ.pop("_CUDA_COMPAT_PATH", None)
     os.environ.pop("Path", None)
     ld = os.environ.get("LD_LIBRARY_PATH", "")
@@ -40,7 +40,7 @@ def setup_cuda_env(*, warmup: bool = True) -> None:
         cudalib = "/usr/local/cuda/targets/x86_64-linux/lib"
         os.environ["LD_LIBRARY_PATH"] = f"{head}:{cudalib}" + (f":{ld}" if ld else "")
     os.environ["HAMI_DISABLE_WARN"] = "1"
-    os.environ["CUDA_MODULE_LOADING"] = "EAGER"
+    os.environ.setdefault("CUDA_MODULE_LOADING", "LAZY")
     if "TORCH_CUDA_ARCH_LIST" not in os.environ:
         os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0;8.6;8.9;9.0+PTX"
     if not warmup or os.environ.get("LITEPT_SKIP_CUDA_WARMUP") == "1":
@@ -92,11 +92,12 @@ def ensure_preds(
     timestamps: list[str],
     agg_timestamps: list[str] | None = None,
     stride: int = 2,
-    agg_stride: int = 5,
+    agg_stride: int = 1,
     max_frames: int = 0,
     config_file: str = "configs/waymo/semseg-litept-small-v1m1.py",
     weight: str = "checkpoints/waymo-semseg-litept-small-v1m1/model/model_best.pth",
     grid_size: float = 0.05,
+    require_cached: bool = False,
 ) -> None:
     """Fill missing preds via A CLI only (no import of infer modules)."""
     need = list(dict.fromkeys(list(timestamps) + list(agg_timestamps or [])))
@@ -105,18 +106,23 @@ def ensure_preds(
         pp = pred_dir / f"{ts}_pred.npy"
         binp = clip_dir / "frames" / ts / "lidar_merge.bin"
         if not binp.is_file():
-            continue
+            raise FileNotFoundError(f'Missing source point cloud: {binp}')
+        if binp.stat().st_size % (4 * len(LIDAR_COLS)):
+            raise ValueError(f'Misaligned source point cloud: {binp}')
         n = binp.stat().st_size // (4 * len(LIDAR_COLS))
         ok = False
         if pp.is_file():
             try:
-                ok = int(np.load(pp).shape[0]) == n
+                ok = np.load(pp, mmap_mode='r').shape == (n,)
             except Exception:
                 ok = False
         if not ok:
             missing.append(ts)
     if not missing:
+        print(f"[ensure_preds] reused {len(need)} aligned cached frames; inference not run", flush=True)
         return
+    if require_cached:
+        raise RuntimeError(f'Missing/alignment-invalid cached predictions for {len(missing)} frames; inference is disabled')
     script = ROOT / "tools" / "warmup_robotruck_preds.py"
     if not script.is_file():
         raise FileNotFoundError(f"missing preds ({len(missing)}) and A CLI {script}")
