@@ -9,9 +9,18 @@ _active_sink = None
 
 
 def write_bytes(path, data):
+    if _active_sink is not None and hasattr(_active_sink, 'write_bytes'):
+        _active_sink.write_bytes(path, data)
+        return
     path.write_bytes(data)
     if _active_sink is not None:
         _active_sink.submit(path, data=data)
+
+
+def reference(uri):
+    if _active_sink is not None and hasattr(_active_sink, 'reference'):
+        return _active_sink.reference(uri)
+    return {}
 
 
 def camera_ready(path, md5):

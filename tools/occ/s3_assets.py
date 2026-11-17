@@ -2,6 +2,10 @@
 import base64
 import hashlib
 from pathlib import Path, PurePosixPath
+from concurrent.futures import ThreadPoolExecutor
+
+MULTIPART_THRESHOLD = 64 * 1024**2
+MULTIPART_PART_SIZE = 16 * 1024**2
 
 
 def s3_publisher(bucket, prefix, mount_root, *, profile=None, endpoint_url=None, client=None, checksums=None):
@@ -43,8 +47,8 @@ def s3_publisher(bucket, prefix, mount_root, *, profile=None, endpoint_url=None,
 
     def publish(path, *, source_camera_md5=None, data=None):
         path = Path(path)
-        stat = path.stat()
-        signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        stat = path.stat() if data is None else None
+        signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) if stat else None
         known = (checksums or {}).get(signature) if data is None else None
         if known is not None:
             digest, md5 = known
@@ -73,7 +77,28 @@ def s3_publisher(bucket, prefix, mount_root, *, profile=None, endpoint_url=None,
         if head is None:
             if data is None:
                 data = path.read_bytes()
-            response = client.put_object(Bucket=bucket, Key=key, Body=data,
+            if length >= MULTIPART_THRESHOLD:
+                upload_id = client.create_multipart_upload(Bucket=bucket, Key=key,
+                    Metadata={'sha256': digest}, ContentType='application/octet-stream')['UploadId']
+                try:
+                    def send_part(index):
+                        body = data[index*MULTIPART_PART_SIZE:(index+1)*MULTIPART_PART_SIZE]
+                        uploaded_part = client.upload_part(Bucket=bucket, Key=key, UploadId=upload_id,
+                            PartNumber=index+1, Body=body,
+                            ContentMD5=base64.b64encode(hashlib.md5(body).digest()).decode())
+                        return {'PartNumber': index+1, 'ETag': uploaded_part['ETag']}
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        parts = list(pool.map(send_part, range((length+MULTIPART_PART_SIZE-1)//MULTIPART_PART_SIZE)))
+                    response = client.complete_multipart_upload(Bucket=bucket, Key=key,
+                        UploadId=upload_id, MultipartUpload={'Parts': parts})
+                except BaseException:
+                    try:
+                        client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+                    except Exception:
+                        pass
+                    raise
+            else:
+                response = client.put_object(Bucket=bucket, Key=key, Body=data,
                               ContentMD5=base64.b64encode(md5).decode(),
                               Metadata={'sha256': digest},
                               ContentType='image/jpeg' if suffix.lower() in ('.jpg', '.jpeg') else 'application/octet-stream')
@@ -88,4 +113,10 @@ def s3_publisher(bucket, prefix, mount_root, *, profile=None, endpoint_url=None,
         uploaded[key] = result
         return dict(result)
 
+    def reference_from_checksum(path, digest, length):
+        suffix = ''.join(Path(path).suffixes) or '.bin'
+        key = str(PurePosixPath(prefix) / digest[:2] / digest[2:4] / (digest[4:] + suffix))
+        return {'storage': 's3', 'bucket': bucket, 'key': key,
+                'uri': str(Path(mount_root) / key), 'sha256': digest, 'length': length}
+    publish.reference_from_checksum = reference_from_checksum
     return publish

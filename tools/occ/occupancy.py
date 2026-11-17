@@ -59,6 +59,21 @@ def build_occupancy(
 
     xyz = np.asarray(xyz, dtype=np.float32)
     lab = np.asarray(labels, dtype=np.int32).reshape(-1)
+    import os
+    backend = os.environ.get('OCC_VOXEL_BACKEND',
+                             'gpu' if os.environ.get('OCC_VOXEL_SORT') == 'gpu' else 'cpu')
+    if backend not in ('cpu', 'gpu'):
+        raise ValueError(f'Unknown OCC_VOXEL_BACKEND: {backend}')
+    if backend == 'gpu':
+        from occupancy_gpu import components
+        ijk, majority, counts, max_z = components(
+            xyz, lab, (x0, x1, y0, y1, z0, z1), v, (nx, ny, nz), min_points)
+        centers = np.stack([
+            lo + (ijk[:, axis].astype(np.float32) + .5) * v
+            for axis, lo in enumerate((x0, y0, z0))], axis=1).astype(np.float32)
+        return OccupancyGrid(ijk=ijk, centers=centers, labels=majority, counts=counts,
+                             max_z=max_z, voxel=v, x_range=x_range, y_range=y_range,
+                             z_range=z_range, shape=(nx, ny, nz))
     from voxel_votes import pack_voxels
     if pack_voxels is not None:
         bounds = tuple(np.float32(value) for value in (x0, x1, y0, y1, z0, z1, v))

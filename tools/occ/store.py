@@ -158,11 +158,14 @@ def store(path: Path, asset_root: Path) -> dict:
         "length": target.stat().st_size, "sha256": digest,
     }
 
-def upload_group(scene: Path, group: dict | None, asset_root: Path, *, publish=None):
+def upload_group(scene: Path, group: dict | None, asset_root: Path, *, publish=None, reuse_s3=False):
     if group is None:
         return None
     output = {}
     for name, ref in group.items():
+        if reuse_s3 and isinstance(ref, dict) and ref.get('storage') == 's3':
+            output[name] = dict(ref)
+            continue
         if not isinstance(ref, dict) or "uri" not in ref:
             output[name] = ref
             continue
@@ -206,14 +209,21 @@ def validate_camera_assets(meta, raw_cameras):
             raise ValueError(f"non-finite camera calibration: {camera.get('name')}")
     return cameras
 
-def validate_scene_assets(scene, value):
+def validate_scene_assets(scene, value, *, allow_s3=False):
     """Check every referenced file before the first Mongo/blob write."""
     import numpy as np
     if isinstance(value, list):
         for child in value:
-            validate_scene_assets(scene, child)
+            validate_scene_assets(scene, child, allow_s3=allow_s3)
     elif isinstance(value, dict):
         if 'uri' in value:
+            if allow_s3 and value.get('storage') == 's3':
+                if not all(value.get(k) for k in ('bucket', 'key', 'sha256')):
+                    raise ValueError('Incomplete streamed asset reference')
+                expected = int(np.prod(value['shape'])) * np.dtype(value['dtype']).itemsize
+                if expected != value['length']:
+                    raise ValueError('Streamed asset shape/length mismatch')
+                return
             path = (scene / value['uri']).resolve()
             if not path.is_file():
                 raise FileNotFoundError(path)
@@ -223,7 +233,7 @@ def validate_scene_assets(scene, value):
                     raise ValueError(f"asset shape/length mismatch: {path}")
         else:
             for child in value.values():
-                validate_scene_assets(scene, child)
+                validate_scene_assets(scene, child, allow_s3=allow_s3)
 
 
 def published_ego_pose(meta, raw):

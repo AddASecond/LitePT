@@ -65,6 +65,7 @@ def asset_ref(uri: str, dtype: str, shape: list) -> dict:
         "dtype": dtype,
         "shape": list(shape),
         "byte_order": "little",
+        **artifact_io.reference(uri),
     }
 
 
@@ -186,7 +187,23 @@ def export_frame(
     lab_s = np.zeros((0,), np.int32)
     lid_s = np.zeros((0,), np.int32)
     xyz_s = np.zeros((0, 3), np.float32)
-    if static_agg is not None and static_agg["xyz_map"].shape[0] > 0:
+    gpu_shared = (os.environ.get('OCC_STATIC_BACKEND') == 'gpu' and shared_static
+                  and static_agg is not None and len(static_agg['xyz_map']) > 0)
+    if gpu_shared:
+        import cupy as cp
+        import occupancy_gpu
+        import static_gpu
+        dyn = np.isin(pred, list(sag.WAYMO_DYNAMIC_IDS))
+        dynamic_rt7 = rt7.map_labels(pred[dyn])
+        with occupancy_gpu.frame_stream():
+            xyz_s, lab_s = static_gpu.view(static_agg, T_map_v_lidar,
+                x_range=(x_range[0]*1.5, x_range[1]*1.5), y_range=y_range,
+                z_range=(z_range[0]-2, z_range[1]+5))
+            vis_xyz = cp.concatenate((xyz_s, cp.asarray(coord[dyn])))
+            mapped = cp.concatenate((cp.asarray(rt7.WAYMO_TO_RT7)[lab_s], cp.asarray(dynamic_rt7)))
+            grid = occupancy_gpu.build_grid(vis_xyz, mapped, x_range=x_range,
+                y_range=y_range, z_range=z_range, voxel=occ_voxel, min_points=occ_min_points)
+    elif static_agg is not None and static_agg["xyz_map"].shape[0] > 0:
         pose = reference_pose
         if pose:
             T_map_v = T_map_v_lidar
@@ -205,15 +222,16 @@ def export_frame(
     else:
         vis_xyz, vis_lab, vis_lid = coord, pred, lidar_ids
 
-    grid = occmod.build_occupancy(
-        vis_xyz,
-        rt7.map_labels(vis_lab),
-        x_range=x_range,
-        y_range=y_range,
-        z_range=z_range,
-        voxel=occ_voxel,
-        min_points=occ_min_points,
-    )
+    if not gpu_shared:
+        grid = occmod.build_occupancy(
+            vis_xyz,
+            rt7.map_labels(vis_lab),
+            x_range=x_range,
+            y_range=y_range,
+            z_range=z_range,
+            voxel=occ_voxel,
+            min_points=occ_min_points,
+        )
 
     out_frame.mkdir(parents=True, exist_ok=True)
     cam_dir = out_frame / "cameras"
@@ -696,7 +714,7 @@ def export_one(args) -> int:
         },
         "defaults": {
             "occ_voxel": args.occ_voxel,
-            "roi": {"x": [-24.0, 24.0], "y": [-25.0, 150.0], "z": [-5.0, 3.0]},
+            "roi": {"x": list(x_range), "y": list(y_range), "z": list(z_range)},
             "vehicle_frame": {
                 "x": "lateral",
                 "y": "forward",
@@ -726,7 +744,11 @@ def export_one(args) -> int:
         index["static_agg"] = index_static_agg
     # Initialize the immutable transform input once before concurrent frame work.
     if static_agg is not None and getattr(args, 'frame_workers', 1) > 1:
-        sag.prepare_static_transform(static_agg)
+        if os.environ.get('OCC_STATIC_BACKEND') == 'gpu' and args.shared_static:
+            import static_gpu
+            static_gpu.prepare(static_agg)
+        else:
+            sag.prepare_static_transform(static_agg)
     stage_started = time.monotonic()
     with ThreadPoolExecutor(max_workers=max(1, args.camera_workers)) as camera_executor:
         def one_frame(ts):
