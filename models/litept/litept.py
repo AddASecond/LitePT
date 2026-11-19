@@ -3,7 +3,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 import spconv.pytorch as spconv
-import flash_attn
+from compat_ops import flash_attn
 from timm.layers import DropPath
 
 from libs.pointrope import PointROPE

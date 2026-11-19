@@ -6,11 +6,11 @@ import sys
 from collections import OrderedDict
 from functools import partial
 
-import flash_attn
+from compat_ops import flash_attn
 import spconv.pytorch as spconv
 import torch
 import torch.nn as nn
-import torch_scatter
+from compat_ops import torch_scatter
 
 from addict import Dict
 from timm.layers import DropPath

@@ -3,7 +3,9 @@ import torch
 import logging
 import numpy as np
 from torchmetrics.classification import MulticlassConfusionMatrix
-from torch_scatter import scatter_add
+from compat_ops import torch_scatter
+
+scatter_add = torch_scatter.scatter_add
 from torch import Tensor
 
 class BaseMetricResults(dict):

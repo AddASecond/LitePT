@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import spconv.pytorch as spconv
 
-import torch_scatter
+from compat_ops import torch_scatter
 
 from addict import Dict
 from collections import OrderedDict

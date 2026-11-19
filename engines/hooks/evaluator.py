@@ -3,7 +3,7 @@ import numpy as np
 import wandb
 import torch
 import torch.distributed as dist
-import pointops
+from compat_ops import pointops
 from uuid import uuid4
 
 import utils.comm as comm
@@ -15,7 +15,9 @@ from .builder import HOOKS
 from datasets.transform import Compose
 from metrics.semantic import ConfusionMatrix
 
-from torch_scatter import scatter_mean
+from compat_ops import torch_scatter
+
+scatter_mean = torch_scatter.scatter_mean
 from torch.nn.functional import normalize
 from tqdm import tqdm
 

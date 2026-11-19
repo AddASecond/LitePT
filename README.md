@@ -189,6 +189,23 @@ sh scripts/train.sh -g 4 -d scannet200 -c insseg-litept-small-v1m2 -n insseg-lit
 
 ## Testing
 
+### Optional inference operator compatibility
+
+`compat_ops` preserves the previously local PyTorch inference helpers in source
+control. Model imports prefer installed `flash_attn`, `torch_scatter` and
+`pointops` packages. Only a missing top-level package enables the fallback;
+broken native installs and missing native dependencies still raise their error.
+Do not place replacement modules named `flash_attn.py`, `torch_scatter.py` or
+`pointops.py` in the repository root, where they would shadow native packages.
+
+The fallback implements packed variable-length attention through PyTorch SDPA,
+CSR sum/mean/max, and dimension-zero scatter sum/mean. PointOps is an import-only
+placeholder for inference registration; evaluation that calls `knn_query` still
+requires the real PointOps extension. These helpers do not replace the full
+training/evaluation APIs or promise native-kernel performance. PyTorch, spconv
+and other model dependencies remain required. Test the supported subset with
+`python -m pytest tests/test_compat_ops.py` (CPU and CUDA when available).
+
 ###  Semantic segmentation
 The training pipeline automatically runs testing once training is complete through the ```PreciseEvaluator``` hook. Alternatively, standalone testing with pretrained weights can be run as follows:
 
